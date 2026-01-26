@@ -22,7 +22,7 @@ CONFIG_FILE = "config.json"
 CHECK_INTERVAL = 15
 LOW_CPU_THRESHOLD = 0.3
 MAX_LOWCPU_TIME = 90
-COOLDOWN_TIME = 120
+COOLDOWN_TIME = 180 # Aumentado para 3 minutos para garantir estabilidade inicial
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -118,17 +118,27 @@ class RobloxManager:
         with Live(self.make_layout(), refresh_per_second=1) as live:
             while self.is_running:
                 for pkg in self.packages:
-                    if time.time() < self.cooldowns.get(pkg, 0): continue
+                    # Se estiver em cooldown, apenas ignora e passa para o próximo
+                    if time.time() < self.cooldowns.get(pkg, 0):
+                        continue
                     
+                    # Verifica se o processo existe
                     pid = self.run_adb(f"pidof {pkg}")
+                    
+                    # Se o processo NÃO existe, ele caiu. Reinicia.
                     if not pid:
+                        self.add_log(f"❌ {pkg} fechado. Reiniciando...", "red")
                         self.reconnect(pkg)
                         continue
 
+                    # Se o processo EXISTE, verifica o estado da interface (UI)
                     state = self.check_ui_state(pkg)
+                    
+                    # SÓ REINICIA se o estado for explicitamente problemático
                     if state in ["disconnected", "home", "bubble_or_background"]:
-                        self.add_log(f"⚠️ {pkg}: {state}", "yellow")
+                        self.add_log(f"⚠️ {pkg} em estado crítico: {state}", "yellow")
                         self.reconnect(pkg)
+                    # Se o estado for "ok", não faz nada, deixa o jogo rodar.
                 
                 live.update(self.make_layout())
                 time.sleep(CHECK_INTERVAL)
