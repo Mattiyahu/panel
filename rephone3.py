@@ -85,6 +85,48 @@ def adb_paste():
     adb("input keyevent 279")
     time.sleep(0.5)
 
+def open_clipboard_url_in_browser():
+    """
+    Abre o link que está na área de transferência no navegador padrão.
+    Usa múltiplos métodos para garantir compatibilidade.
+    """
+    # Método 1: Tenta obter a URL da clipboard via service call
+    try:
+        # Obtem o conteúdo da clipboard
+        clipboard_content = adb("service call clipboard 2 s16 com.android.shell", timeout=3)
+        
+        # Extrai a URL do resultado
+        url_match = re.search(r'(https?://[^\s"\)]+)', clipboard_content)
+        if url_match:
+            url = url_match.group(1)
+            adb(f"am start -a android.intent.action.VIEW -d '{url}'")
+            return True
+    except:
+        pass
+    
+    # Método 2: Abre o navegador e cola a URL
+    try:
+        # Abre o Chrome/navegador padrão
+        adb("am start -a android.intent.action.VIEW -d 'about:blank'")
+        time.sleep(2)
+        
+        # Clica na barra de endereços (geralmente no topo)
+        screen_w, screen_h = get_screen_size()
+        adb_tap(screen_w // 2, 80)  # Barra de endereços
+        time.sleep(1)
+        
+        # Cola o conteúdo da clipboard
+        adb_paste()
+        time.sleep(0.5)
+        
+        # Pressiona Enter para navegar
+        adb_keyevent(66)  # KEYCODE_ENTER
+        return True
+    except:
+        pass
+    
+    return False
+
 def force_portrait():
     """Forca o modo retrato"""
     adb("settings put system accelerometer_rotation 0")
@@ -467,6 +509,11 @@ class DeltaKeyBypass:
         """
         Processa o bypass de key.
         Assume que o app já está em foco e xml já foi capturado.
+        
+        Fluxo:
+        1. Detecta tela "Welcome Back!"
+        2. Clica em "Continue" 2 vezes
+        3. Abre o link da área de transferência no navegador
         """
         name = pkg.split('.')[-1].upper()
         
@@ -476,60 +523,26 @@ class DeltaKeyBypass:
         self.log(f"🔑 {name}: KEY DETECTADA!")
         send_webhook(CONFIG.get("webhook_url", ""), f"🔑 **{name}**: Key detectada!", screenshot=True)
 
-        # Passo 1: Clicar em "Receive Key"
-        self.log(f"→ Clicando Receive Key...")
-        if not click_element_by_text("Receive Key", xml):
-            adb_tap(350, 515)
-        time.sleep(2)
-
-        # Passo 2: Clicar em "Checkpoint opened"
-        xml = get_ui_xml()
-        self.log(f"→ Procurando Checkpoint...")
-        if not click_element_by_text("Checkpoint", xml):
-            if not click_element_by_text("opened", xml):
-                adb_tap(350, 600)
-        time.sleep(2)
-
-        # Passo 3: Abrir link no navegador (já deve estar na clipboard)
-        self.log(f"→ Abrindo navegador...")
-        time.sleep(4)
-
-        # Passo 4: Clicar em "Copy" na página
-        xml = get_ui_xml()
-        self.log(f"→ Copiando key...")
-        if not click_element_by_text("Copy", xml):
-            adb_tap(540, 670)
-        time.sleep(2)
-
-        # Passo 5: Voltar para o jogo
-        self.log(f"→ Voltando para o jogo...")
-        adb_keyevent(4)  # Back
-        time.sleep(1)
-        bring_to_focus(pkg)
-        time.sleep(2)
-
-        # Passo 6: Clicar no campo de key
-        xml = get_ui_xml()
-        self.log(f"→ Focando campo...")
-        if not click_element_by_text("KEY_example", xml):
-            if not click_element_by_text("Enter key", xml):
-                adb_tap(350, 330)
-        time.sleep(1)
-
-        # Passo 7: Colar a key
-        self.log(f"→ Colando key...")
-        adb_paste()
-        time.sleep(1)
-
-        # Passo 8: Clicar em "Continue"
-        xml = get_ui_xml()
-        self.log(f"→ Confirmando...")
+        # Passo 1: Clicar em "Continue" (1ª vez)
+        self.log(f"→ Clicando Continue (1/2)...")
         if not click_element_by_text("Continue", xml):
             adb_tap(350, 427)
         time.sleep(2)
 
-        send_webhook(CONFIG.get("webhook_url", ""), f"✅ **{name}**: Bypass concluído!", screenshot=True)
-        self.log(f"✅ {name}: BYPASS COMPLETO!")
+        # Passo 2: Clicar em "Continue" (2ª vez)
+        xml = get_ui_xml()
+        self.log(f"→ Clicando Continue (2/2)...")
+        if not click_element_by_text("Continue", xml):
+            adb_tap(350, 427)
+        time.sleep(2)
+
+        # Passo 3: Abrir o link da área de transferência no navegador
+        self.log(f"→ Abrindo link no navegador...")
+        open_clipboard_url_in_browser()
+        time.sleep(3)
+
+        send_webhook(CONFIG.get("webhook_url", ""), f"✅ **{name}**: Continue clicado e link aberto!", screenshot=True)
+        self.log(f"✅ {name}: PROCESSO COMPLETO!")
         
         return True
 
