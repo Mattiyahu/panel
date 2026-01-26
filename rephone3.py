@@ -1,125 +1,170 @@
 #!/usr/bin/env python3
-import subprocess, time, re, os, json, datetime
+import subprocess, time, re, datetime, os, json
 
-CFG="config.json"
-CHECK=6
-COOLDOWN=90
-FOCUS_DELAY=0.7
+CFG_FILE="config.json"
 
-WORDS_REJOIN = [
-    "reconnect","reconnecting","disconnected","connection lost","lost connection",
-    "reconectar","desconectado","tentar novamente","retry"
-]
-WORDS_HOME = ["home","discover","avatar","friends","search","pesquisar"]
-WORDS_KEY  = ["welcome back","enter key","receive key","atlas","key system","continue"]
+DEFAULT = {
+    "vip_link": "",
+    "cycle_delay": 2.0,       # tempo entre clones
+    "join_wait": 12.0,        # quanto espera após mandar join
+    "max_join_tries": 3,      # tentativas de entrar sem fechar
+    "force_restart_after": 2  # se falhar X joins, aí força stop
+}
 
-def sh(cmd, t=15):
+HOME_KEYS = ["home", "discover", "avatar", "friends", "search", "pesquisar", "recommended", "recomendados", "robux"]
+ERROR_KEYS = ["disconnected","reconnect","connection lost","lost connection","desconectado","reconectar","retry","tentar novamente"]
+
+def log(msg):
+    t=datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{t}] {msg}", flush=True)
+
+def sh(cmd, t=12):
     try:
         return subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, timeout=t).decode(errors="ignore").strip()
     except:
         return ""
 
-def adb(cmd, t=15): return sh(f"adb shell {cmd}", t)
+def adb(cmd, t=12):
+    return sh(f"adb shell {cmd}", t)
 
-def load():
-    d={"vip":"","wh":""}
-    if os.path.exists(CFG):
-        try: d.update(json.load(open(CFG,"r",encoding="utf-8")))
-        except: pass
+def load_cfg():
+    d=DEFAULT.copy()
+    if os.path.exists(CFG_FILE):
+        try:
+            d.update(json.load(open(CFG_FILE,"r",encoding="utf-8")))
+        except:
+            pass
     return d
 
-def save(d): json.dump(d, open(CFG,"w",encoding="utf-8"), indent=2, ensure_ascii=False)
+def save_cfg(d):
+    json.dump(d, open(CFG_FILE,"w",encoding="utf-8"), indent=2, ensure_ascii=False)
 
-def hook(msg, wh):
-    if not wh: return
-    try: subprocess.run(["python","-c",f"import requests;requests.post('{wh}',json={{'content':{msg!r}}},timeout=6)"], timeout=8)
-    except: pass
+CFG=load_cfg()
 
-def packages():
-    out=adb("pm list packages", 12)
-    pk=[]
+def get_packages():
+    out = adb("pm list packages", 12)
+    pkgs=[]
     for l in out.splitlines():
         if l.startswith("package:"):
             p=l.replace("package:","").strip()
-            if "roblox" in p.lower(): pk.append(p)
-    return sorted(set(pk))
+            if "roblox" in p.lower():
+                pkgs.append(p)
+    return sorted(set(pkgs))
 
-def focus(pkg):
-    res=adb(f"cmd package resolve-activity --brief {pkg}", 10).splitlines()
-    act=res[-1].strip() if res else ""
-    if "/" in act: adb(f"am start -n {act}", 12)
-    else: adb(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1", 12)
-    time.sleep(FOCUS_DELAY)
+def resolve_activity(pkg):
+    res = adb(f"cmd package resolve-activity --brief {pkg}", 10)
+    lines=[x.strip() for x in res.splitlines() if x.strip()]
+    return lines[-1] if lines else ""
 
-def screenshot_local(name="screen.png"):
-    adb(f"screencap -p /sdcard/{name}", 10)
-    sh(f"adb pull /sdcard/{name} ./{name}", 15)
-    return os.path.exists(f"./{name}")
+def focus_pkg(pkg):
+    act = resolve_activity(pkg)
+    if "/" in act:
+        adb(f"am start -n {act}", 15)
+    else:
+        adb(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1", 15)
+    time.sleep(0.8)
 
-def ocr_text(img="screen.png"):
-    # OCR rápido
-    sh("rm -f out.txt", 5)
-    sh(f"tesseract {img} out -l eng --psm 6", 25)
-    if os.path.exists("out.txt"):
-        txt=open("out.txt","r",encoding="utf-8",errors="ignore").read().lower()
-        return re.sub(r"\s+"," ",txt)
-    return ""
+def dump_ui():
+    adb("uiautomator dump /sdcard/ui.xml >/dev/null 2>&1", 12)
+    time.sleep(0.2)
+    return adb("cat /sdcard/ui.xml 2>/dev/null", 10)
 
-def stop(pkg): adb(f"am force-stop {pkg}", 10)
+def detect_home(xml):
+    x=(xml or "").lower()
+    count=sum(1 for k in HOME_KEYS if k in x)
+    return count >= 2
 
-def start_vip(pkg, vip):
-    out=adb(f"am start -n {pkg}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d '{vip}'", 15)
-    if "Error" in out or "Exception" in out:
-        adb(f"am start -a android.intent.action.VIEW -d '{vip}'", 15)
-    time.sleep(2)
+def detect_error(xml):
+    x=(xml or "").lower()
+    return any(k in x for k in ERROR_KEYS)
+
+def join_vip(pkg, vip):
+    # entrar no jogo sem fechar o app
+    # tenta mandar pro pacote certo
+    adb(f"am start -a android.intent.action.VIEW -d '{vip}' {pkg}", 15)
+
+def force_restart(pkg, vip):
+    adb(f"am force-stop {pkg}", 10)
+    time.sleep(1.5)
+    adb(f"am start -a android.intent.action.VIEW -d '{vip}'", 15)
+
+def pid(pkg):
+    return adb(f"pidof {pkg}", 6)
 
 def main():
-    cfg=load()
-    if not cfg["vip"]:
-        cfg["vip"]=input("Cole VIP link: ").strip()
-        cfg["wh"]=input("Webhook (opcional): ").strip()
-        save(cfg)
+    global CFG
+    if not CFG["vip_link"]:
+        CFG["vip_link"]=input("Cole o VIP link: ").strip()
+        save_cfg(CFG)
 
-    pkgs=packages()
+    vip=CFG["vip_link"]
+    pkgs=get_packages()
     if not pkgs:
-        print("Sem pacotes roblox.")
+        log("❌ Nenhum pacote Roblox encontrado.")
         return
-    print("Pacotes:", pkgs)
 
-    cd={p:0 for p in pkgs}
+    log("✅ Pacotes detectados:")
+    for p in pkgs:
+        log(f"  - {p}")
+
+    join_fail = {p:0 for p in pkgs}
+
+    log("🚀 Round-robin iniciado (1 por 1). CTRL+C para sair.\n")
 
     while True:
         for p in pkgs:
-            if time.time()<cd[p]: 
+            name=p.split(".")[-1].upper()
+
+            log(f"🟦 FOCANDO {name}...")
+            focus_pkg(p)
+
+            if not pid(p):
+                log(f"❌ {name} está fechado -> abrindo VIP")
+                force_restart(p, vip)
+                join_fail[p]=0
+                time.sleep(CFG["cycle_delay"])
                 continue
 
-            focus(p)
+            log(f"🔎 LENDO TELA {name} (uiautomator)...")
+            xml=dump_ui()
 
-            if not screenshot_local("r.png"):
+            if not xml or len(xml) < 80:
+                # UI falhou (normal no DeltaClone)
+                log(f"⚠️ {name} UI vazia -> tentando JOIN VIP mesmo assim")
+                join_vip(p, vip)
+                time.sleep(CFG["join_wait"])
+                time.sleep(CFG["cycle_delay"])
                 continue
 
-            txt=ocr_text("r.png")
-            if not txt:
-                # OCR falhou -> não faz nada
+            if detect_error(xml):
+                log(f"⚠️ {name} erro (disconnect/reconnect) -> FORCE RESTART")
+                force_restart(p, vip)
+                join_fail[p]=0
+                time.sleep(CFG["cycle_delay"])
                 continue
 
-            if any(w in txt for w in WORDS_REJOIN):
-                print("REJOIN:", p)
-                stop(p); time.sleep(1)
-                start_vip(p, cfg["vip"])
-                cd[p]=time.time()+COOLDOWN
-            elif sum(1 for w in WORDS_HOME if w in txt) >= 2:
-                print("HOME:", p)
-                stop(p); time.sleep(1)
-                start_vip(p, cfg["vip"])
-                cd[p]=time.time()+COOLDOWN
-            elif any(w in txt for w in WORDS_KEY):
-                print("KEY/CONTINUE:", p)
-                # aqui você pode clicar ou só avisar
-                # hook(f"🔑 KEY/CONTINUE em {p}", cfg["wh"])
-                cd[p]=time.time()+20
+            if detect_home(xml):
+                log(f"🏠 {name} HOME detectada -> tentando entrar SEM fechar (JOIN VIP)")
+                join_vip(p, vip)
+                time.sleep(CFG["join_wait"])
 
-        time.sleep(CHECK)
+                # re-checa
+                xml2=dump_ui()
+                if xml2 and detect_home(xml2):
+                    join_fail[p]+=1
+                    log(f"❌ {name} ainda HOME (fail {join_fail[p]}/{CFG['max_join_tries']})")
+                    if join_fail[p] >= CFG["max_join_tries"]:
+                        log(f"💥 {name} falhou muito -> FORCE RESTART")
+                        force_restart(p, vip)
+                        join_fail[p]=0
+                else:
+                    log(f"✅ {name} parece que saiu da HOME (ok)")
+                    join_fail[p]=0
+
+            else:
+                log(f"✅ {name} OK (não está em HOME)")
+
+            time.sleep(CFG["cycle_delay"])
 
 if __name__=="__main__":
     main()
