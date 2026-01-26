@@ -19,8 +19,8 @@ from rich import print as rprint
 # Configurações Globais
 console = Console()
 CONFIG_FILE = "config.json"
-CHECK_INTERVAL = 5
-COOLDOWN_TIME = 150
+CHECK_INTERVAL = 3  # Reduzido para ser ultra-rápido
+COOLDOWN_TIME = 120
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -35,7 +35,6 @@ def save_config(config_data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=4)
 
-# Inicialização segura
 _config = load_config()
 VIP_LINK = _config.get("vip_link", "")
 WEBHOOK_URL = _config.get("webhook_url", "")
@@ -45,85 +44,89 @@ class InstanceMonitor:
         self.package = package
         self.manager = manager
         self.pid = None
-        self.uid = None
         self.cpu = 0.0
         self.net_usage = "0 KB/s"
         self.last_bytes = 0
-        self.status_code = "SYNC" # Termos: SYNC, ACTIVE, IDLE, RECOVERY
+        self.status_code = "SYNC"
         self.error_count = 0
-        self.cooldown_until = time.time() + 10
+        self.cooldown_until = time.time() + 5
         self.is_running = True
+        self.lock = threading.Lock()
 
     def run_adb(self, command):
         try:
-            result = subprocess.run(f"adb shell {command}", shell=True, capture_output=True, text=True, timeout=5)
+            # Timeout curto para não travar a thread
+            result = subprocess.run(f"adb shell {command}", shell=True, capture_output=True, text=True, timeout=2)
             return result.stdout.strip()
         except:
             return ""
 
-    def get_uid(self):
-        if not self.uid:
-            out = self.run_adb(f"dumpsys package {self.package} | grep userId=")
-            if out:
-                try: self.uid = out.split('=')[1].split()[0]
-                except: pass
-        return self.uid
-
     def update_stats(self):
-        self.pid = self.run_adb(f"pidof {self.package}")
-        if not self.pid:
-            self.cpu = 0.0
-            self.net_usage = "OFFLINE"
-            self.status_code = "RECOVERY"
-            return
+        with self.lock:
+            # 1. PID Check
+            self.pid = self.run_adb(f"pidof {self.package}")
+            if not self.pid:
+                self.cpu = 0.0
+                self.net_usage = "OFFLINE"
+                self.status_code = "RECOVERY"
+                return
 
-        # CPU
-        top_out = self.run_adb(f"top -n 1 -p {self.pid} | grep {self.pid}")
-        if top_out:
-            try:
-                parts = top_out.split()
-                for p in parts:
-                    if "%" in p: self.cpu = float(p.replace("%", "").replace(",", "."))
-            except: pass
-
-        # Network Heartbeat (UID based)
-        uid = self.get_uid()
-        if uid:
-            net_out = self.run_adb(f"cat /proc/net/xt_qtaguid/stats | grep {uid}")
-            if net_out:
+            # 2. CPU Check (via top - mais rápido)
+            top_out = self.run_adb(f"top -n 1 -p {self.pid} | grep {self.pid}")
+            if top_out:
                 try:
-                    current_bytes = sum(int(line.split()[5]) for line in net_out.splitlines())
-                    if self.last_bytes > 0:
-                        diff = (current_bytes - self.last_bytes) / 1024 / CHECK_INTERVAL
-                        self.net_usage = f"{diff:.1f} KB/s"
-                    self.last_bytes = current_bytes
+                    parts = top_out.split()
+                    for p in parts:
+                        if "%" in p: 
+                            self.cpu = float(p.replace("%", "").replace(",", "."))
+                            break
                 except: pass
 
-        if time.time() < self.cooldown_until:
-            self.status_code = "SYNC"
-        elif self.cpu > 50.0:
-            self.status_code = "ACTIVE"
-            self.error_count = 0
-        else:
-            self.status_code = "IDLE"
+            # 3. Network Check (UID)
+            uid_out = self.run_adb(f"dumpsys package {self.package} | grep userId=")
+            if uid_out:
+                try:
+                    uid = uid_out.split('=')[1].split()[0]
+                    net_out = self.run_adb(f"cat /proc/net/xt_qtaguid/stats | grep {uid}")
+                    if net_out:
+                        current_bytes = sum(int(line.split()[5]) for line in net_out.splitlines())
+                        if self.last_bytes > 0:
+                            diff = (current_bytes - self.last_bytes) / 1024 / CHECK_INTERVAL
+                            self.net_usage = f"{diff:.1f} KB/s"
+                        self.last_bytes = current_bytes
+                except: pass
+
+            # 4. Status Logic
+            if time.time() < self.cooldown_until:
+                self.status_code = "SYNC"
+            elif self.cpu > 10.0:
+                self.status_code = "ACTIVE"
+                self.error_count = 0
+            else:
+                self.status_code = "IDLE"
 
     def monitor_logic(self):
         while self.is_running:
             if not self.manager.global_running: break
+            
             self.update_stats()
+            
+            # Ação Real se não estiver em cooldown
             if time.time() > self.cooldown_until:
                 if not self.pid:
                     self.reboot("Signal Lost")
-                elif self.cpu < 15.0 and "0.0" in self.net_usage:
+                elif self.cpu < 5.0: # Se a CPU estiver morta
                     self.error_count += 1
-                    if self.error_count >= 10:
+                    if self.error_count >= 15: # ~45 segundos de inatividade real
                         self.reboot("Data Timeout")
                 else:
                     self.error_count = 0
-                    # Verificação de UI rápida
-                    ui = self.run_adb("uiautomator dump /sdcard/view.xml > /dev/null 2>&1 && cat /sdcard/view.xml").lower()
-                    if any(x in ui for x in ["disconnected", "desconectado", "reconnect"]):
-                        self.reboot("Link Break")
+                    # Verificação de UI apenas se necessário (mais lenta)
+                    if self.error_count % 5 == 0:
+                        ui = self.run_adb("uiautomator dump /sdcard/view.xml > /dev/null 2>&1 && cat /sdcard/view.xml").lower()
+                        if any(x in ui for x in ["disconnected", "desconectado", "reconnect"]):
+                            self.reboot("Link Break")
+            
             time.sleep(CHECK_INTERVAL)
 
     def reboot(self, reason):
@@ -156,20 +159,30 @@ class RE_PHONE_Manager:
             rprint("[red]❌ Configure o VIP LINK primeiro![/red]")
             time.sleep(2)
             return
+        
         self.global_running = True
+        # Busca pacotes de forma limpa
         output = subprocess.run("adb shell pm list packages roblox", shell=True, capture_output=True, text=True).stdout
         packages = [line.replace("package:", "").strip() for line in output.splitlines() if "roblox" in line]
+        
+        if not packages:
+            rprint("[red]❌ Nenhum pacote Roblox encontrado via ADB![/red]")
+            time.sleep(2)
+            return
+
         for pkg in packages:
             if pkg not in self.instances:
                 inst = InstanceMonitor(pkg, self)
                 self.instances[pkg] = inst
-                threading.Thread(target=inst.monitor_logic, daemon=True).start()
+                t = threading.Thread(target=inst.monitor_logic, daemon=True)
+                t.start()
         
+        # HUD com atualização forçada e tratamento de erro
         with Live(self.make_hud(), refresh_per_second=4, screen=True) as live:
             try:
                 while self.global_running:
                     live.update(self.make_hud())
-                    time.sleep(0.25)
+                    time.sleep(0.2)
             except KeyboardInterrupt:
                 self.global_running = False
 
@@ -180,20 +193,33 @@ class RE_PHONE_Manager:
             Layout(name="body", size=12),
             Layout(name="footer", size=10)
         )
-        layout["header"].update(Panel(Align.center("[bold cyan]RE_PHONE HUD[/bold cyan] [white]by MSA[/white]"), border_style="cyan"))
+        layout["header"].update(Panel(Align.center("[bold cyan]RE_PHONE HUD v5.1 TURBO[/bold cyan] [white]by MSA[/white]"), border_style="cyan"))
+        
         table = Table(expand=True, border_style="magenta", header_style="bold white")
         table.add_column("INSTANCE", style="green")
         table.add_column("CPU", justify="center")
         table.add_column("NETWORK", justify="center")
         table.add_column("STATUS", justify="center")
+        
         for pkg, inst in self.instances.items():
             name = pkg.split('.')[-1].upper()
-            cpu_color = "green" if inst.cpu > 50 else "yellow" if inst.cpu > 10 else "red"
-            net_color = "cyan" if "KB/s" in inst.net_usage and float(inst.net_usage.split()[0]) > 0 else "red"
-            status_style = "bold green" if inst.status_code == "ACTIVE" else "bold blue"
-            if inst.status_code == "RECOVERY": status_style = "bold red"
+            with inst.lock:
+                cpu_val = inst.cpu
+                net_val = inst.net_usage
+                status_val = inst.status_code
             
-            table.add_row(f"[bold]{name}[/bold]", f"[{cpu_color}]{inst.cpu}%[/{cpu_color}]", f"[{net_color}]{inst.net_usage}[/{net_color}]", f"[{status_style}]{inst.status_code}[/{status_style}]")
+            cpu_color = "green" if cpu_val > 50 else "yellow" if cpu_val > 5 else "red"
+            net_color = "cyan" if "KB/s" in net_val and float(net_val.split()[0]) > 0 else "red"
+            status_style = "bold green" if status_val == "ACTIVE" else "bold blue"
+            if status_val == "RECOVERY": status_style = "bold red"
+            
+            table.add_row(
+                f"[bold]{name}[/bold]", 
+                f"[{cpu_color}]{cpu_val}%[/{cpu_color}]", 
+                f"[{net_color}]{net_val}[/{net_color}]", 
+                f"[{status_style}]{status_val}[/{status_style}]"
+            )
+            
         layout["body"].update(Panel(table, title="[bold yellow]REAL-TIME DATA[/bold yellow]", border_style="magenta"))
         layout["footer"].update(Panel(Text("\n".join(self.logs)), title="[bold cyan]HEARTBEAT LOGS[/bold cyan]", border_style="cyan"))
         return layout
@@ -211,15 +237,17 @@ def main_menu():
     ██╔══██╗██╔══╝  ╚════╝██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║██╔══╝  
     ██║  ██║███████╗      ██║     ██║  ██║╚██████╔╝██║ ╚████║███████╗
     ╚═╝  ╚═╝╚══════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝[/bold cyan]
-    [white]                      by MSA | v5.0 Elite[/white]"""
+    [white]                      by MSA | v5.1 Turbo[/white]"""
         rprint(Align.center(banner))
         status = f"🔗 VIP: {'[green]OK[/green]' if VIP_LINK else '[red]NO[/red]'} | ⚓ WEBHOOK: {'[green]OK[/green]' if WEBHOOK_URL else '[red]NO[/red]'}"
         rprint(Panel(Align.center(status), border_style="white"))
+        
         grid = Table.grid(expand=True, padding=1)
         grid.add_column(ratio=1); grid.add_column(ratio=1)
-        grid.add_row(Panel("[bold green][1] 🚀 LAUNCH REAL-TIME HUD[/bold green]", border_style="green"), Panel("[bold magenta][2] ⚙️ SYSTEM SETTINGS[/bold magenta]", border_style="magenta"))
-        grid.add_row(Panel("[bold blue][3] 🛠️ ADVANCED TOOLS[/bold blue]", border_style="blue"), Panel("[bold red][0] ❌ EXIT SYSTEM[/bold red]", border_style="red"))
+        grid.add_row(Panel("[bold green][1] 🚀 LAUNCH TURBO HUD[/bold green]", border_style="green"), Panel("[bold magenta][2] ⚙️ SETTINGS[/bold magenta]", border_style="magenta"))
+        grid.add_row(Panel("[bold blue][3] 🛠️ TOOLS[/bold blue]", border_style="blue"), Panel("[bold red][0] ❌ EXIT[/bold red]", border_style="red"))
         rprint(grid)
+        
         choice = Prompt.ask("\n[bold white]Action[/bold white]", choices=["1", "2", "3", "0"])
         if choice == "1": manager.start_monitoring()
         elif choice == "2":
