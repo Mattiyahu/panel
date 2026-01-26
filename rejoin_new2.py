@@ -3,9 +3,9 @@ import os
 import subprocess
 import time
 import requests
-import psutil
 import datetime
 import json
+import threading
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -19,11 +19,8 @@ from rich import print as rprint
 # Configurações Globais
 console = Console()
 CONFIG_FILE = "config.json"
-CHECK_INTERVAL = 15
-LOW_CPU_THRESHOLD = 20.0  # Reduzido para ser mais tolerante
-HIGH_CPU_THRESHOLD = 80.0  # Reduzido para considerar jogo ativo mais facilmente
-MAX_LOWCPU_COUNT = 6      # Aumentado para 6 vezes (1.5 min) de tolerância antes de agir
-COOLDOWN_TIME = 120       # Aumentado para 2 minutos para dar tempo real de carregar
+CHECK_INTERVAL = 10
+COOLDOWN_TIME = 180
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -39,19 +36,20 @@ config = load_config()
 VIP_LINK = config.get("vip_link", "")
 WEBHOOK_URL = config.get("webhook_url", "")
 
-class RobloxManager:
-    def __init__(self):
-        self.packages = []
-        self.lowcpu_count = {}
-        self.cooldowns = {}
-        self.is_running = False
-        self.logs = []
-
-    def add_log(self, msg, style="white"):
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        self.logs.append(f"[{timestamp}] {msg}")
-        if len(self.logs) > 12:
-            self.logs.pop(0)
+class InstanceMonitor:
+    """Classe para gerenciar uma única instância de forma isolada."""
+    def __init__(self, package, manager):
+        self.package = package
+        self.manager = manager
+        self.pid = None
+        self.uid = None
+        self.cpu = 0.0
+        self.net_heartbeat = "OFFLINE"
+        self.status_code = "IDLE" # Termos codificados: IDLE, SYNC, ACTIVE, RECOVERY
+        self.last_net_bytes = 0
+        self.low_activity_count = 0
+        self.cooldown_until = 0
+        self.is_running = True
 
     def run_adb(self, command):
         try:
@@ -60,217 +58,198 @@ class RobloxManager:
         except:
             return ""
 
-    def get_packages(self):
-        output = self.run_adb("pm list packages roblox")
-        self.packages = [line.replace("package:", "").strip() for line in output.splitlines() if "roblox" in line]
-        for pkg in self.packages:
-            if pkg not in self.lowcpu_count:
-                self.lowcpu_count[pkg] = 0
-                self.cooldowns[pkg] = 0
-        return self.packages
+    def get_uid(self):
+        if not self.uid:
+            out = self.run_adb(f"dumpsys package {self.package} | grep userId=")
+            if out:
+                try: self.uid = out.split('=')[1].split()[0]
+                except: pass
+        return self.uid
 
-    def send_webhook(self, message):
-        if not WEBHOOK_URL: return
-        try:
-            requests.post(WEBHOOK_URL, json={"content": message}, timeout=5)
-        except:
-            pass
-
-    def get_cpu_usage(self, pid):
-        # Pega a CPU do processo via top
-        output = self.run_adb(f"top -n 1 -p {pid} | grep {pid}")
-        if not output: return 0.0
-        try:
-            parts = output.split()
-            # No Android, a CPU costuma ser a 9ª coluna no top
-            for part in parts:
-                if "%" in part:
-                    return float(part.replace("%", "").replace(",", "."))
-            # Se não achar %, tenta pegar o valor numérico que faz sentido
-            return float(parts[8].replace(",", "."))
-        except:
-            return 0.0
-
-    def reconnect(self, pkg, reason="Desconhecido"):
-        self.add_log(f"🔄 Reiniciando {pkg} ({reason})", "cyan")
-        self.send_webhook(f"⚠️ **REJ_PHONE Alert**: Reiniciando `{pkg}`\nMotivo: `{reason}`")
-        
-        self.run_adb(f"am force-stop {pkg}")
-        time.sleep(2)
-        
-        # Comando de abertura otimizado
-        cmd = f"am start -a android.intent.action.VIEW -d '{VIP_LINK}' {pkg}"
-        self.run_adb(cmd)
-        
-        # Tenta forçar modo janela
-        self.run_adb(f"am start --task-windowing-mode 5 -a android.intent.action.VIEW -d '{VIP_LINK}' {pkg}")
-        
-        self.cooldowns[pkg] = time.time() + COOLDOWN_TIME
-        self.lowcpu_count[pkg] = 0
-
-    def check_ui_state(self, package):
-        focus = self.run_adb("dumpsys window windows | grep -E 'mCurrentFocus'")
-        if package not in focus:
-            return "bubble_or_background"
-
-        ui_xml = self.run_adb("uiautomator dump /sdcard/view.xml > /dev/null 2>&1 && cat /sdcard/view.xml")
-        if not ui_xml: return "ok"
-        
-        ui_lower = ui_xml.lower()
-        if any(x in ui_lower for x in ["disconnected", "desconectado", "connection lost", "reconnect"]):
-            return "disconnected"
-        if all(x in ui_lower for x in ["home", "discover", "avatar"]):
-            return "home"
-        return "ok"
-
-    def monitor_loop(self):
-        if not VIP_LINK:
-            self.add_log("❌ Erro: VIP LINK não configurado!", "red")
+    def update_stats(self):
+        self.pid = self.run_adb(f"pidof {self.package}")
+        if not self.pid:
+            self.cpu = 0.0
+            self.net_heartbeat = "LOST"
+            self.status_code = "RECOVERY"
             return
-        
-        self.is_running = True
-        self.get_packages()
-        
-        with Live(self.make_layout(), refresh_per_second=1) as live:
-            while self.is_running:
-                for pkg in self.packages:
-                    # 1. Respeita o Cooldown (Tempo de estabilização)
-                    if time.time() < self.cooldowns.get(pkg, 0):
-                        continue
-                    
-                    # 2. Verifica se o processo existe
-                    pid = self.run_adb(f"pidof {pkg}")
-                    if not pid:
-                        self.reconnect(pkg, "Processo não encontrado")
-                        continue
 
-                    # 3. Verifica CPU com tolerância alta
-                    cpu = self.get_cpu_usage(pid)
-                    if cpu < LOW_CPU_THRESHOLD:
-                        self.lowcpu_count[pkg] += 1
-                        self.add_log(f"⏳ {pkg} CPU baixa: {cpu}% ({self.lowcpu_count[pkg]}/{MAX_LOWCPU_COUNT})", "yellow")
-                        if self.lowcpu_count[pkg] >= MAX_LOWCPU_COUNT:
-                            self.reconnect(pkg, f"Inatividade confirmada ({cpu}%)")
-                            continue
+        # CPU Stats
+        top_out = self.run_adb(f"top -n 1 -p {self.pid} | grep {self.pid}")
+        if top_out:
+            try:
+                parts = top_out.split()
+                for p in parts:
+                    if "%" in p: self.cpu = float(p.replace("%", "").replace(",", "."))
+            except: pass
+
+        # Network Heartbeat (via UID traffic stats)
+        uid = self.get_uid()
+        if uid:
+            net_out = self.run_adb(f"cat /proc/net/xt_qtaguid/stats | grep {uid}")
+            if net_out:
+                try:
+                    current_bytes = sum(int(line.split()[5]) for line in net_out.splitlines())
+                    if current_bytes > self.last_net_bytes:
+                        self.net_heartbeat = "STABLE"
+                        self.last_net_bytes = current_bytes
                     else:
-                        # Se a CPU subir, reseta o contador de erro imediatamente
-                        if self.lowcpu_count[pkg] > 0:
-                            self.add_log(f"✅ {pkg} estabilizou CPU: {cpu}%", "green")
-                        self.lowcpu_count[pkg] = 0
+                        self.net_heartbeat = "STAGNANT"
+                except: pass
+        
+        # Codificação de Status
+        if time.time() < self.cooldown_until:
+            self.status_code = "SYNC"
+        elif self.cpu > 80:
+            self.status_code = "ACTIVE"
+        else:
+            self.status_code = "IDLE"
 
-                    # 4. Verifica UI apenas se não estiver em "carregamento" aparente
-                    # Só checa UI se a CPU estiver minimamente estável para evitar falsos positivos de "bolha"
-                    if cpu > 10.0:
-                        state = self.check_ui_state(pkg)
-                        if state in ["disconnected", "home"]:
-                            self.reconnect(pkg, f"Erro detectado: {state}")
-                        # Nota: Removi 'bubble_or_background' da reinicialização imediata 
-                        # pois a CPU baixa já vai cuidar disso se o app sumir de verdade.
-                
-                live.update(self.make_layout())
-                time.sleep(CHECK_INTERVAL)
+    def monitor_logic(self):
+        while self.is_running:
+            if not self.manager.global_running: break
+            
+            self.update_stats()
+            
+            if time.time() > self.cooldown_until:
+                # Lógica de Reinicialização Isolada
+                should_reboot = False
+                reason = ""
 
-    def make_layout(self):
+                if not self.pid:
+                    should_reboot = True
+                    reason = "Signal Lost"
+                elif self.cpu < 20.0 and self.net_heartbeat == "STAGNANT":
+                    self.low_activity_count += 1
+                    if self.low_activity_count >= 10:
+                        should_reboot = True
+                        reason = "Data Timeout"
+                else:
+                    self.low_activity_count = 0
+                    # Verificação de UI (apenas se necessário)
+                    ui = self.run_adb("uiautomator dump /sdcard/view.xml > /dev/null 2>&1 && cat /sdcard/view.xml").lower()
+                    if "disconnected" in ui or "desconectado" in ui:
+                        should_reboot = True
+                        reason = "Link Break"
+
+                if should_reboot:
+                    self.reboot_instance(reason)
+
+            time.sleep(CHECK_INTERVAL)
+
+    def reboot_instance(self, reason):
+        self.manager.add_log(f"⚡ [RE_PHONE] {self.package} -> {reason}", "red")
+        self.manager.send_webhook(f"📡 **RE_PHONE Heartbeat**: `{self.package}` -> `{reason}`")
+        self.run_adb(f"am force-stop {self.package}")
+        time.sleep(2)
+        self.run_adb(f"am start -a android.intent.action.VIEW -d '{VIP_LINK}' {self.package}")
+        self.cooldown_until = time.time() + COOLDOWN_TIME
+        self.low_activity_count = 0
+
+class RE_PHONE_Manager:
+    def __init__(self):
+        self.instances = {}
+        self.global_running = False
+        self.logs = []
+        self.webhook_url = WEBHOOK_URL
+
+    def add_log(self, msg, style="white"):
+        t = datetime.datetime.now().strftime("%H:%M:%S")
+        self.logs.append(f"[{t}] {msg}")
+        if len(self.logs) > 10: self.logs.pop(0)
+
+    def send_webhook(self, msg):
+        if self.webhook_url:
+            try: requests.post(self.webhook_url, json={"content": msg}, timeout=5)
+            except: pass
+
+    def start_monitoring(self):
+        self.global_running = True
+        output = subprocess.run("adb shell pm list packages roblox", shell=True, capture_output=True, text=True).stdout
+        packages = [line.replace("package:", "").strip() for line in output.splitlines() if "roblox" in line]
+        
+        for pkg in packages:
+            if pkg not in self.instances:
+                inst = InstanceMonitor(pkg, self)
+                self.instances[pkg] = inst
+                threading.Thread(target=inst.monitor_logic, daemon=True).start()
+        
+        with Live(self.make_hud(), refresh_per_second=2) as live:
+            while self.global_running:
+                live.update(self.make_hud())
+                time.sleep(1)
+
+    def make_hud(self):
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=3),
-            Layout(name="main", size=12),
-            Layout(name="footer", size=14)
+            Layout(name="body", size=15),
+            Layout(name="footer", size=12)
         )
         
-        layout["header"].update(Panel(Align.center("[bold cyan]REJ_PHONE[/bold cyan] [white]by MSA[/white]"), border_style="cyan"))
+        layout["header"].update(Panel(Align.center("[bold cyan]RE_PHONE[/bold cyan] [white]by MSA[/white]"), border_style="cyan"))
         
-        table = Table(expand=True, border_style="blue")
-        table.add_column("Package", style="green")
-        table.add_column("CPU", style="magenta")
-        table.add_column("Status", style="white")
-        table.add_column("Cooldown", style="yellow")
+        table = Table(expand=True, border_style="bright_black", header_style="bold cyan")
+        table.add_column("INSTANCE", style="green")
+        table.add_column("CPU", justify="center")
+        table.add_column("NETWORK", justify="center")
+        table.add_column("STATUS", justify="center")
         
-        for pkg in self.packages:
-            cd = max(0, int(self.cooldowns.get(pkg, 0) - time.time()))
-            pid = self.run_adb(f"pidof {pkg}")
-            cpu = self.get_cpu_usage(pid) if pid else 0.0
+        for pkg, inst in self.instances.items():
+            net_style = "green" if inst.net_heartbeat == "STABLE" else "yellow"
+            status_style = "bold green" if inst.status_code == "ACTIVE" else "bold blue"
+            if inst.status_code == "RECOVERY": status_style = "bold red"
             
-            status = "[green]Jogando[/green]" if cpu > HIGH_CPU_THRESHOLD else "[yellow]Carregando[/yellow]"
-            if cd > 0: status = "[bold blue]Estabilizando[/bold blue]"
+            table.add_row(
+                pkg.split('.')[-1], 
+                f"{inst.cpu}%", 
+                f"[{net_style}]{inst.net_heartbeat}[/{net_style}]", 
+                f"[{status_style}]{inst.status_code}[/{status_style}]"
+            )
             
-            table.add_row(pkg, f"{cpu}%", status, f"{cd}s")
-            
-        layout["main"].update(Panel(table, title="[bold blue]Live Monitor[/bold blue]", border_style="blue"))
-        
-        log_text = Text("\n".join(self.logs))
-        layout["footer"].update(Panel(log_text, title="[bold yellow]System Activity[/bold yellow]", border_style="yellow"))
-        
+        layout["body"].update(Panel(table, title="[bold white]REAL-TIME HUD[/bold white]", border_style="bright_black"))
+        layout["footer"].update(Panel(Text("\n".join(self.logs)), title="[bold yellow]HEARTBEAT LOGS[/bold yellow]", border_style="yellow"))
         return layout
 
-manager = RobloxManager()
+manager = RE_PHONE_Manager()
 
-def get_banner():
-    banner = """
-    [bold cyan]
+def main_menu():
+    while True:
+        console.clear()
+        banner = """[bold cyan]
     ██████╗ ███████╗      ██████╗ ██╗  ██╗ ██████╗ ███╗   ██╗███████╗
     ██╔══██╗██╔════╝      ██╔══██╗██║  ██║██╔═══██╗████╗  ██║██╔════╝
     ██████╔╝█████╗  █████╗██████╔╝███████║██║   ██║██╔██╗ ██║█████╗  
     ██╔══██╗██╔══╝  ╚════╝██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║██╔══╝  
     ██║  ██║███████╗      ██║     ██║  ██║╚██████╔╝██║ ╚████║███████╗
-    ╚═╝  ╚═╝╚══════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
-    [/bold cyan][white]                      by MSA[/white]
-    """
-    return Align.center(banner)
-
-def show_main_menu():
-    console.clear()
-    rprint(get_banner())
-    
-    status_info = f"🔗 VIP: {'[green]SET[/green]' if VIP_LINK else '[red]EMPTY[/red]'} | ⚓ Webhook: {'[green]SET[/green]' if WEBHOOK_URL else '[red]EMPTY[/red]'}"
-    rprint(Panel(Align.center(status_info), border_style="white"))
-
-    menu_table = Table.grid(expand=True, padding=1)
-    menu_table.add_column(justify="center", ratio=1)
-    menu_table.add_column(justify="center", ratio=1)
-    
-    menu_table.add_row(
-        Panel("[bold green][1] 🚀 START MONITOR[/bold green]", border_style="green"),
-        Panel("[bold blue][2] 🛠️ AUTO SETUP[/bold blue]", border_style="blue")
-    )
-    menu_table.add_row(
-        Panel("[bold cyan][3] 📋 LIST CLONES[/bold cyan]", border_style="cyan"),
-        Panel("[bold yellow][4] 🧹 CLEAR CACHE[/bold yellow]", border_style="yellow")
-    )
-    menu_table.add_row(
-        Panel("[bold magenta][5] ⚙️ SETTINGS[/bold magenta]", border_style="magenta"),
-        Panel("[bold red][0] ❌ EXIT[/bold red]", border_style="red")
-    )
-    rprint(menu_table)
-
-def manage_settings():
-    global VIP_LINK, WEBHOOK_URL
-    while True:
-        console.clear()
-        rprint(Panel(Align.center("[bold magenta]SETTINGS[/bold magenta]"), border_style="magenta"))
-        rprint(f"1. Edit VIP Link\n2. Edit Webhook URL\n3. Reset\n0. Back")
-        choice = Prompt.ask("\nSelect", choices=["1", "2", "3", "0"])
-        if choice == "1": VIP_LINK = Prompt.ask("VIP Link")
-        elif choice == "2": WEBHOOK_URL = Prompt.ask("Webhook URL")
-        elif choice == "3": VIP_LINK = WEBHOOK_URL = ""
-        elif choice == "0": break
-        save_config({"vip_link": VIP_LINK, "webhook_url": WEBHOOK_URL})
-
-def main():
-    while True:
-        show_main_menu()
-        choice = Prompt.ask("\n[bold white]Command[/bold white]", choices=["1", "2", "3", "4", "5", "0"])
-        if choice == "1": manager.monitor_loop()
-        elif choice == "2": subprocess.run("bash setup.sh", shell=True); Prompt.ask("\nEnter to return")
+    ╚═╝  ╚═╝╚══════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝[/bold cyan]"""
+        rprint(Align.center(banner))
+        rprint(Align.center("[white]RE_PHONE by MSA | Next-Gen Monitoring[/white]\n"))
+        
+        grid = Table.grid(expand=True, padding=1)
+        grid.add_column(ratio=1); grid.add_column(ratio=1)
+        grid.add_row(
+            Panel("[bold green][1] 🚀 LAUNCH HUD[/bold green]", border_style="green"),
+            Panel("[bold magenta][2] ⚙️ SETTINGS[/bold magenta]", border_style="magenta")
+        )
+        grid.add_row(
+            Panel("[bold blue][3] 🛠️ TOOLS[/bold blue]", border_style="blue"),
+            Panel("[bold red][0] ❌ EXIT[/bold red]", border_style="red")
+        )
+        rprint(grid)
+        
+        choice = Prompt.ask("\n[bold white]Select[/bold white]", choices=["1", "2", "3", "0"])
+        if choice == "1": manager.start_monitoring()
+        elif choice == "2":
+            global VIP_LINK, WEBHOOK_URL
+            VIP_LINK = Prompt.ask("VIP Link", default=VIP_LINK)
+            WEBHOOK_URL = Prompt.ask("Webhook URL", default=WEBHOOK_URL)
+            save_config({"vip_link": VIP_LINK, "webhook_url": WEBHOOK_URL})
         elif choice == "3":
-            pkgs = manager.get_packages()
-            t = Table(title="Clones", border_style="cyan")
-            t.add_column("ID"); t.add_column("Package")
-            for i, p in enumerate(pkgs): t.add_row(str(i+1), p)
-            rprint(t); Prompt.ask("\nEnter to return")
-        elif choice == "4": manager.clear_cache(); Prompt.ask("\nEnter to return")
-        elif choice == "5": manage_settings()
+            rprint("[yellow]Running Setup...[/yellow]")
+            subprocess.run("bash setup.sh", shell=True)
+            Prompt.ask("Done. Enter to return")
         elif choice == "0": break
 
 if __name__ == "__main__":
-    main()
+    main_menu()
