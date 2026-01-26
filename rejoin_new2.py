@@ -19,11 +19,11 @@ from rich import print as rprint
 # Configurações Globais
 console = Console()
 CONFIG_FILE = "config.json"
-CHECK_INTERVAL = 10
-LOW_CPU_THRESHOLD = 30.0  # Abaixo de 30% = Fora do jogo
-HIGH_CPU_THRESHOLD = 100.0 # Acima de 100% = No jogo
-MAX_LOWCPU_COUNT = 3      # Quantas vezes seguidas com CPU baixa antes de reiniciar
-COOLDOWN_TIME = 60        # Cooldown reduzido para 1 minuto
+CHECK_INTERVAL = 15
+LOW_CPU_THRESHOLD = 20.0  # Reduzido para ser mais tolerante
+HIGH_CPU_THRESHOLD = 80.0  # Reduzido para considerar jogo ativo mais facilmente
+MAX_LOWCPU_COUNT = 6      # Aumentado para 6 vezes (1.5 min) de tolerância antes de agir
+COOLDOWN_TIME = 120       # Aumentado para 2 minutos para dar tempo real de carregar
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -134,27 +134,38 @@ class RobloxManager:
         with Live(self.make_layout(), refresh_per_second=1) as live:
             while self.is_running:
                 for pkg in self.packages:
-                    if time.time() < self.cooldowns.get(pkg, 0): continue
+                    # 1. Respeita o Cooldown (Tempo de estabilização)
+                    if time.time() < self.cooldowns.get(pkg, 0):
+                        continue
                     
+                    # 2. Verifica se o processo existe
                     pid = self.run_adb(f"pidof {pkg}")
                     if not pid:
-                        self.reconnect(pkg, "Processo fechado")
+                        self.reconnect(pkg, "Processo não encontrado")
                         continue
 
-                    # Verificação de CPU (Prioridade)
+                    # 3. Verifica CPU com tolerância alta
                     cpu = self.get_cpu_usage(pid)
                     if cpu < LOW_CPU_THRESHOLD:
                         self.lowcpu_count[pkg] += 1
+                        self.add_log(f"⏳ {pkg} CPU baixa: {cpu}% ({self.lowcpu_count[pkg]}/{MAX_LOWCPU_COUNT})", "yellow")
                         if self.lowcpu_count[pkg] >= MAX_LOWCPU_COUNT:
-                            self.reconnect(pkg, f"CPU Baixa ({cpu}%)")
+                            self.reconnect(pkg, f"Inatividade confirmada ({cpu}%)")
                             continue
                     else:
+                        # Se a CPU subir, reseta o contador de erro imediatamente
+                        if self.lowcpu_count[pkg] > 0:
+                            self.add_log(f"✅ {pkg} estabilizou CPU: {cpu}%", "green")
                         self.lowcpu_count[pkg] = 0
 
-                    # Verificação de UI
-                    state = self.check_ui_state(pkg)
-                    if state in ["disconnected", "home", "bubble_or_background"]:
-                        self.reconnect(pkg, f"Estado UI: {state}")
+                    # 4. Verifica UI apenas se não estiver em "carregamento" aparente
+                    # Só checa UI se a CPU estiver minimamente estável para evitar falsos positivos de "bolha"
+                    if cpu > 10.0:
+                        state = self.check_ui_state(pkg)
+                        if state in ["disconnected", "home"]:
+                            self.reconnect(pkg, f"Erro detectado: {state}")
+                        # Nota: Removi 'bubble_or_background' da reinicialização imediata 
+                        # pois a CPU baixa já vai cuidar disso se o app sumir de verdade.
                 
                 live.update(self.make_layout())
                 time.sleep(CHECK_INTERVAL)
