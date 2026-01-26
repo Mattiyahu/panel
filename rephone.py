@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-RE_PHONE v8.1 by MSA
+RE_PHONE v8.2 by MSA
 Sistema de Monitoramento e Automação para Roblox
-Com Auto-Detect de Key do Delta
+Com Verificação Individual de Key por Janela
 """
 import os
 import subprocess
@@ -46,7 +46,7 @@ CONFIG = load_config()
 # ═══════════════════════════════════════════════════════════════════
 # FUNÇÕES ADB OTIMIZADAS
 # ═══════════════════════════════════════════════════════════════════
-def adb(cmd, timeout=3):
+def adb(cmd, timeout=5):
     try:
         return subprocess.check_output(f"adb shell {cmd}", shell=True, stderr=subprocess.DEVNULL, timeout=timeout).decode().strip()
     except: return ""
@@ -55,26 +55,40 @@ def adb_tap(x, y):
     adb(f"input tap {x} {y}")
 
 def adb_text(txt):
-    safe_txt = txt.replace("'", "")
+    safe_txt = txt.replace("'", "").replace('"', '')
     adb(f"input text '{safe_txt}'")
 
 def adb_keyevent(key):
     adb(f"input keyevent {key}")
 
 def get_ui_xml():
-    adb("uiautomator dump /sdcard/ui.xml > /dev/null 2>&1")
-    return adb("cat /sdcard/ui.xml").lower()
+    adb("uiautomator dump /sdcard/ui.xml > /dev/null 2>&1", timeout=10)
+    return adb("cat /sdcard/ui.xml", timeout=5)
 
 def find_element_bounds(xml, text):
-    pattern = rf'text="[^"]*{text.lower()}[^"]*"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+    """Encontra coordenadas de um elemento pelo texto (case insensitive)"""
+    pattern = rf'text="([^"]*{re.escape(text)}[^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
     match = re.search(pattern, xml, re.IGNORECASE)
     if match:
-        x1, y1, x2, y2 = map(int, match.groups())
+        x1, y1, x2, y2 = map(int, match.groups()[1:])
         return (x1 + x2) // 2, (y1 + y2) // 2
     return None
 
-def click_element_by_text(text):
-    xml = get_ui_xml()
+def find_clickable_link(xml):
+    """Encontra um link clicável na UI"""
+    # Procura por URLs ou botões que parecem links
+    pattern = r'text="(https?://[^"]+)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+    match = re.search(pattern, xml, re.IGNORECASE)
+    if match:
+        url = match.group(1)
+        x1, y1, x2, y2 = map(int, match.groups()[1:])
+        return url, ((x1 + x2) // 2, (y1 + y2) // 2)
+    return None, None
+
+def click_element_by_text(text, xml=None):
+    """Clica em um elemento pelo texto"""
+    if xml is None:
+        xml = get_ui_xml()
     coords = find_element_bounds(xml, text)
     if coords:
         adb_tap(coords[0], coords[1])
@@ -108,10 +122,33 @@ def stop_app(pkg):
 def start_vip(pkg, link):
     adb(f"am start -a android.intent.action.VIEW -d '{link}' {pkg}")
 
-def send_webhook(url, msg):
-    if url:
-        try: requests.post(url, json={"content": msg}, timeout=3)
-        except: pass
+def bring_to_front(pkg):
+    """Traz o app para frente (tela cheia)"""
+    # Método 1: Usar monkey para abrir o app
+    adb(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1 > /dev/null 2>&1")
+    time.sleep(1)
+
+def maximize_window(pkg):
+    """Tenta maximizar a janela do app"""
+    # Primeiro traz para frente
+    bring_to_front(pkg)
+    time.sleep(0.5)
+    # Tenta maximizar via wm
+    adb(f"am start --activity-task-on-home -n {pkg}/.MainActivity 2>/dev/null")
+
+def send_webhook(url, msg, screenshot=False):
+    if not url:
+        return
+    try:
+        if screenshot:
+            # Tira screenshot e envia
+            adb("screencap -p /sdcard/screen.png")
+            subprocess.run("adb pull /sdcard/screen.png /tmp/screen.png", shell=True, capture_output=True)
+            with open("/tmp/screen.png", "rb") as f:
+                requests.post(url, files={"file": ("screenshot.png", f)}, data={"content": msg}, timeout=10)
+        else:
+            requests.post(url, json={"content": msg}, timeout=5)
+    except: pass
 
 # ═══════════════════════════════════════════════════════════════════
 # CLASSE DE INSTÂNCIA ISOLADA
@@ -126,6 +163,7 @@ class Instance:
         self.last_event = "Starting..."
         self.errors = 0
         self.cooldown = 0
+        self.key_cooldown = 0
         self.active = True
         self.lock = threading.Lock()
 
@@ -167,81 +205,150 @@ class Instance:
         start_vip(self.pkg, vip)
 
 # ═══════════════════════════════════════════════════════════════════
-# AUTO-DETECT E AUTOMAÇÃO DE KEY DO DELTA
+# VERIFICADOR DE KEY INDIVIDUAL
 # ═══════════════════════════════════════════════════════════════════
-class KeyAutoDetect:
-    """Sistema de detecção automática de tela de key"""
+class KeyChecker:
+    """Verifica key em cada janela individualmente"""
     def __init__(self, monitor):
         self.monitor = monitor
         self.running = False
-        self.last_key_time = 0
-        self.key_cooldown = 60  # Espera 60s entre tentativas de key
+        self.checking = False
+        self.current_pkg = ""
 
     def detect_key_screen(self, xml):
         """Detecta se a tela de key está visível"""
+        xml_lower = xml.lower()
         key_indicators = [
-            "get key", "receive key", "checkpoint", "key system",
-            "obter key", "pegar key", "verificação", "linkvertise",
-            "lootlink", "delta key"
+            "receive key", "get key", "checkpoint", "key system",
+            "obter key", "pegar key", "continue key", "enter key"
         ]
-        return any(ind in xml for ind in key_indicators)
+        return any(ind in xml_lower for ind in key_indicators)
 
-    def process_key(self):
-        """Processa automaticamente a key do Delta"""
-        self.monitor.log("🔑 KEY DETECTADA - Iniciando bypass...")
-        send_webhook(CONFIG.get("webhook_url", ""), "🔑 **RE_PHONE**: Key do Delta detectada, iniciando bypass...")
+    def process_key_for_package(self, pkg):
+        """Processa a key para um pacote específico"""
+        self.current_pkg = pkg
+        name = pkg.split('.')[-1].upper()
+        self.monitor.log(f"🔍 Verificando key: {name}")
 
-        # Passo 1: Clicar no botão de key
-        buttons = ["get key", "receive key", "checkpoint", "obter key", "pegar key", "continue"]
-        for btn in buttons:
-            if click_element_by_text(btn):
+        # Passo 1: Trazer a janela para frente
+        bring_to_front(pkg)
+        time.sleep(2)
+
+        # Passo 2: Capturar a UI
+        xml = get_ui_xml()
+
+        # Passo 3: Verificar se tem tela de key
+        if not self.detect_key_screen(xml):
+            self.monitor.log(f"✓ {name}: Sem key")
+            return False
+
+        self.monitor.log(f"🔑 {name}: KEY DETECTADA!")
+        send_webhook(CONFIG.get("webhook_url", ""), f"🔑 **{name}**: Key detectada, iniciando bypass...", screenshot=True)
+
+        # Passo 4: Clicar em "Receive Key" ou similar
+        key_buttons = ["receive key", "get key", "obter key", "pegar key", "continue"]
+        clicked = False
+        for btn in key_buttons:
+            if click_element_by_text(btn, xml):
                 self.monitor.log(f"✓ Clicou: {btn}")
+                clicked = True
                 break
+
+        if not clicked:
+            # Tenta coordenadas padrão (centro inferior da tela)
+            adb_tap(540, 1400)
+            self.monitor.log("✓ Clicou coordenada padrão")
+
+        time.sleep(3)
+
+        # Passo 5: Verificar se abriu link/navegador
+        xml = get_ui_xml()
         
-        time.sleep(4)
+        # Procurar por botões de continuar no navegador/linkvertise
+        continue_buttons = ["continue", "proceed", "prosseguir", "next", "verificar", "free access", "direct link"]
+        for btn in continue_buttons:
+            if click_element_by_text(btn, xml):
+                self.monitor.log(f"✓ Navegador: {btn}")
+                time.sleep(3)
+                xml = get_ui_xml()
+                break
 
-        # Passo 2: Verificar se abriu página de verificação
+        # Passo 6: Tentar copiar a key
+        time.sleep(2)
         xml = get_ui_xml()
-        if "continue" in xml or "proceed" in xml or "prosseguir" in xml:
-            for btn in ["continue", "proceed", "prosseguir", "next", "verificar"]:
-                if click_element_by_text(btn):
-                    self.monitor.log(f"✓ Verificação: {btn}")
-                    break
-            time.sleep(5)
+        
+        copy_buttons = ["copy", "copiar", "copy key", "get key"]
+        for btn in copy_buttons:
+            if click_element_by_text(btn, xml):
+                self.monitor.log(f"✓ Key copiada!")
+                time.sleep(1)
+                break
 
-        # Passo 3: Tentar pegar a key
+        # Passo 7: Voltar para o app e colar
+        adb_keyevent(4)  # Back
+        time.sleep(1)
+        adb_keyevent(4)  # Back novamente se necessário
+        time.sleep(1)
+
+        # Trazer o Roblox de volta
+        bring_to_front(pkg)
+        time.sleep(2)
+
+        # Tentar colar a key
         xml = get_ui_xml()
-        if "copy" in xml or "copiar" in xml:
-            for btn in ["copy", "copiar", "copy key"]:
-                if click_element_by_text(btn):
-                    self.monitor.log("✓ Key copiada!")
-                    break
-            
-            time.sleep(2)
-            adb_keyevent(4)  # Back
-            time.sleep(1)
+        
+        # Procurar campo de entrada
+        if "enter key" in xml.lower() or "input" in xml.lower():
+            # Clicar no campo de entrada
+            if click_element_by_text("enter key", xml) or click_element_by_text("key", xml):
+                time.sleep(0.5)
             adb_keyevent(279)  # Paste
-            
-            for btn in ["play", "execute", "continuar", "confirm", "submit"]:
-                if click_element_by_text(btn):
-                    self.monitor.log(f"✓ Finalizado: {btn}")
-                    break
+            time.sleep(1)
 
-        self.last_key_time = time.time()
-        send_webhook(CONFIG.get("webhook_url", ""), "✅ **RE_PHONE**: Bypass de key concluído!")
+        # Clicar em confirmar/play
+        confirm_buttons = ["confirm", "submit", "play", "execute", "continuar", "ok"]
+        for btn in confirm_buttons:
+            if click_element_by_text(btn):
+                self.monitor.log(f"✓ Confirmado: {btn}")
+                break
+
+        send_webhook(CONFIG.get("webhook_url", ""), f"✅ **{name}**: Bypass concluído!")
+        self.monitor.log(f"✅ {name}: Bypass completo!")
+        
+        return True
+
+    def check_all_packages(self):
+        """Verifica key em todos os pacotes, um por vez"""
+        if self.checking:
+            return
+        
+        self.checking = True
+        pkgs = get_packages()
+        
+        for pkg in pkgs:
+            if not self.running:
+                break
+            
+            inst = self.monitor.instances.get(pkg)
+            if inst:
+                # Só verifica se passou o cooldown de key
+                if time.time() > inst.key_cooldown:
+                    try:
+                        if self.process_key_for_package(pkg):
+                            inst.key_cooldown = time.time() + 300  # 5 min cooldown após key
+                    except Exception as e:
+                        self.monitor.log(f"⚠️ Erro key {pkg.split('.')[-1]}: {str(e)[:20]}")
+            
+            time.sleep(2)  # Pausa entre verificações
+        
+        self.checking = False
 
     def worker(self):
-        """Thread de monitoramento contínuo para detectar key"""
+        """Thread de verificação periódica"""
         while self.running:
             if CONFIG.get("auto_key", True):
-                # Só verifica se passou o cooldown
-                if time.time() - self.last_key_time > self.key_cooldown:
-                    try:
-                        xml = get_ui_xml()
-                        if self.detect_key_screen(xml):
-                            self.process_key()
-                    except: pass
-            time.sleep(5)  # Verifica a cada 5 segundos
+                self.check_all_packages()
+            time.sleep(30)  # Verifica a cada 30 segundos
 
     def start(self):
         self.running = True
@@ -258,12 +365,12 @@ class Monitor:
         self.instances = {}
         self.running = False
         self.logs = []
-        self.key_detector = KeyAutoDetect(self)
+        self.key_checker = KeyChecker(self)
 
     def log(self, msg):
         t = datetime.datetime.now().strftime("%H:%M:%S")
         self.logs.append(f"[{t}] {msg}")
-        if len(self.logs) > 6: self.logs.pop(0)
+        if len(self.logs) > 8: self.logs.pop(0)
 
     def worker(self, inst):
         while self.running and inst.active:
@@ -295,10 +402,10 @@ class Monitor:
             self.instances[p] = inst
             threading.Thread(target=self.worker, args=(inst,), daemon=True).start()
 
-        # Inicia o detector de key automaticamente
+        # Inicia o verificador de key
         if CONFIG.get("auto_key", True):
-            self.key_detector.start()
-            self.log("🔑 Auto-Key ATIVADO")
+            self.key_checker.start()
+            self.log("🔑 Auto-Key ATIVADO (Verificação Individual)")
 
         with Live(self.render(), refresh_per_second=2, screen=True) as live:
             try:
@@ -307,23 +414,24 @@ class Monitor:
                     time.sleep(0.5)
             except KeyboardInterrupt:
                 self.running = False
-                self.key_detector.stop()
+                self.key_checker.stop()
 
     def render(self):
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=5),
-            Layout(name="main", size=14),
-            Layout(name="logs", size=8)
+            Layout(name="main", size=12),
+            Layout(name="logs", size=10)
         )
 
-        # Header com indicador de Auto-Key
         auto_key_status = "[green]ON[/green]" if CONFIG.get("auto_key", True) else "[red]OFF[/red]"
+        checking = f" [yellow](Verificando: {self.key_checker.current_pkg.split('.')[-1]})[/yellow]" if self.key_checker.checking else ""
+        
         header = Text()
         header.append("╔══════════════════════════════════════════════════════════╗\n", style="bright_red")
         header.append("║          ", style="bright_red")
         header.append("RE_PHONE", style="bold white on red")
-        header.append("  v8.1  ", style="bold bright_red")
+        header.append("  v8.2  ", style="bold bright_red")
         header.append("by MSA", style="italic white")
         header.append("               ║\n", style="bright_red")
         header.append("╚══════════════════════════════════════════════════════════╝", style="bright_red")
@@ -358,9 +466,8 @@ class Monitor:
 
             table.add_row(f"[white]{name}[/white]", cpu_txt, status_txt, f"[dim]{event}[/dim]")
 
-        # Adiciona linha de status do Auto-Key
         table.add_row("", "", "", "")
-        table.add_row(f"[bright_red]🔑 AUTO-KEY[/bright_red]", "", auto_key_status, "[dim]Detecta key automaticamente[/dim]")
+        table.add_row(f"[bright_red]🔑 AUTO-KEY[/bright_red]", "", auto_key_status, f"[dim]Verifica cada janela{checking}[/dim]")
 
         layout["main"].update(Panel(table, title="[bold white on red] MONITORAMENTO [/bold white on red]", border_style="bright_red", box=DOUBLE))
 
@@ -386,31 +493,29 @@ def main_menu():
     ██╔══██╗██╔══╝  ╚════╝██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║██╔══╝  
     ██║  ██║███████╗      ██║     ██║  ██║╚██████╔╝██║ ╚████║███████╗
     ╚═╝  ╚═╝╚══════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝[/bold bright_red]
-    [white]                      v8.1 AUTO-KEY by MSA[/white]"""
+    [white]                   v8.2 INDIVIDUAL KEY by MSA[/white]"""
         rprint(banner)
         
-        # Status
         vip_ok = "✓" if CONFIG.get("vip_link") else "✗"
         wh_ok = "✓" if CONFIG.get("webhook_url") else "✗"
         ak_ok = "✓" if CONFIG.get("auto_key", True) else "✗"
         status_line = f"[bright_red]VIP:[/bright_red] [{('green' if vip_ok == '✓' else 'red')}]{vip_ok}[/] | [bright_red]WEBHOOK:[/bright_red] [{('green' if wh_ok == '✓' else 'red')}]{wh_ok}[/] | [bright_red]AUTO-KEY:[/bright_red] [{('green' if ak_ok == '✓' else 'red')}]{ak_ok}[/]"
         rprint(Panel(Align.center(status_line), border_style="red"))
 
-        # Menu
         menu = Table.grid(expand=True, padding=1)
         menu.add_column(ratio=1)
         menu.add_column(ratio=1)
         menu.add_row(
-            Panel("[bold white][1] 🚀 INICIAR MONITOR[/bold white]\n[dim]Com Auto-Key ativado[/dim]", border_style="bright_red"),
+            Panel("[bold white][1] 🚀 INICIAR MONITOR[/bold white]\n[dim]Verifica key em cada janela[/dim]", border_style="bright_red"),
             Panel("[bold white][2] ⚙️ CONFIGURAÇÕES[/bold white]", border_style="red")
         )
         menu.add_row(
-            Panel("[bold white][3] 🔑 KEY MANUAL[/bold white]\n[dim]Executar bypass agora[/dim]", border_style="red"),
+            Panel("[bold white][3] 🔑 VERIFICAR KEYS AGORA[/bold white]\n[dim]Executa verificação manual[/dim]", border_style="red"),
             Panel("[bold white][4] 🛠️ FERRAMENTAS[/bold white]", border_style="red")
         )
         menu.add_row(
             Panel("[bold white][0] ❌ SAIR[/bold white]", border_style="dark_red"),
-            Panel("[dim]RE_PHONE v8.1 by MSA[/dim]", border_style="dark_red")
+            Panel("[dim]RE_PHONE v8.2 by MSA[/dim]", border_style="dark_red")
         )
         rprint(menu)
 
@@ -421,7 +526,7 @@ def main_menu():
         elif choice == "2":
             config_menu()
         elif choice == "3":
-            manual_key()
+            manual_key_check()
         elif choice == "4":
             tools_menu()
         elif choice == "0":
@@ -452,54 +557,37 @@ def config_menu():
         rprint(f"[green]Auto-Key {status}![/green]")
         time.sleep(1)
 
-def manual_key():
-    """Executa o bypass de key manualmente"""
+def manual_key_check():
+    """Verifica keys manualmente em todos os pacotes"""
     console.clear()
-    rprint(Panel("[bold]BYPASS DE KEY MANUAL[/bold]", border_style="bright_red"))
-    rprint("[yellow]Iniciando automação...[/yellow]")
+    rprint(Panel("[bold]VERIFICAÇÃO MANUAL DE KEYS[/bold]", border_style="bright_red"))
     
-    xml = get_ui_xml()
-    if "key" not in xml and "checkpoint" not in xml:
-        rprint("[red]Tela de key não detectada. Abra o Delta primeiro.[/red]")
+    pkgs = get_packages()
+    if not pkgs:
+        rprint("[red]Nenhum pacote Roblox encontrado![/red]")
         Prompt.ask("Enter para voltar")
         return
+
+    rprint(f"[yellow]Encontrados {len(pkgs)} pacotes. Verificando cada um...[/yellow]\n")
     
-    rprint("[green]✓ Tela de key detectada[/green]")
+    checker = KeyChecker(type('obj', (object,), {'log': lambda self, x: rprint(x), 'instances': {}})())
     
-    buttons = ["get key", "receive key", "checkpoint", "obter key", "pegar key"]
-    for btn in buttons:
-        if click_element_by_text(btn):
-            rprint(f"[green]✓ Clicou em '{btn}'[/green]")
-            break
-    
-    time.sleep(4)
-    
-    xml = get_ui_xml()
-    if "continue" in xml or "proceed" in xml:
-        for btn in ["continue", "proceed", "prosseguir", "next"]:
-            if click_element_by_text(btn):
-                rprint(f"[green]✓ Clicou em '{btn}'[/green]")
-                break
-        time.sleep(5)
-    
-    xml = get_ui_xml()
-    if "copy" in xml or "copiar" in xml:
-        for btn in ["copy", "copiar", "copy key"]:
-            if click_element_by_text(btn):
-                rprint(f"[green]✓ Key copiada![/green]")
-                break
+    for pkg in pkgs:
+        name = pkg.split('.')[-1].upper()
+        rprint(f"\n[bright_red]═══ {name} ═══[/bright_red]")
+        
+        try:
+            result = checker.process_key_for_package(pkg)
+            if result:
+                rprint(f"[green]✓ Key processada para {name}[/green]")
+            else:
+                rprint(f"[blue]✓ {name} não precisa de key[/blue]")
+        except Exception as e:
+            rprint(f"[red]✗ Erro em {name}: {e}[/red]")
         
         time.sleep(2)
-        adb_keyevent(4)
-        time.sleep(1)
-        adb_keyevent(279)
-        
-        for btn in ["play", "execute", "continuar", "confirm"]:
-            if click_element_by_text(btn):
-                rprint(f"[green]✓ Finalizado![/green]")
-                break
     
-    rprint("\n[bold green]Automação concluída![/bold green]")
+    rprint("\n[bold green]Verificação concluída![/bold green]")
     Prompt.ask("Enter para voltar")
 
 def tools_menu():
@@ -510,9 +598,10 @@ def tools_menu():
     rprint("[2] Parar Todos os Roblox")
     rprint("[3] Listar Pacotes")
     rprint("[4] Testar ADB")
+    rprint("[5] Trazer Janela para Frente")
     rprint("[0] Voltar")
     
-    opt = Prompt.ask("Opção", choices=["1", "2", "3", "4", "0"])
+    opt = Prompt.ask("Opção", choices=["1", "2", "3", "4", "5", "0"])
     if opt == "1":
         force_portrait()
         rprint("[green]Modo retrato ativado![/green]")
@@ -524,13 +613,25 @@ def tools_menu():
         time.sleep(1)
     elif opt == "3":
         pkgs = get_packages()
-        for p in pkgs:
-            rprint(f"[green]• {p}[/green]")
+        for i, p in enumerate(pkgs, 1):
+            rprint(f"[green]{i}. {p}[/green]")
         Prompt.ask("Enter")
     elif opt == "4":
         out = subprocess.run("adb devices", shell=True, capture_output=True, text=True).stdout
         rprint(out)
         Prompt.ask("Enter")
+    elif opt == "5":
+        pkgs = get_packages()
+        for i, p in enumerate(pkgs, 1):
+            rprint(f"[green]{i}. {p.split('.')[-1]}[/green]")
+        idx = Prompt.ask("Número do pacote", default="1")
+        try:
+            pkg = pkgs[int(idx) - 1]
+            bring_to_front(pkg)
+            rprint(f"[green]Janela {pkg.split('.')[-1]} trazida para frente![/green]")
+        except:
+            rprint("[red]Índice inválido[/red]")
+        time.sleep(2)
 
 if __name__ == "__main__":
     main_menu()
