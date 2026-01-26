@@ -1,183 +1,125 @@
 #!/usr/bin/env python3
-import subprocess, time, re, json, os, datetime
-import requests
-from rich.live import Live
-from rich.table import Table
-from rich.console import Console
+import subprocess, time, re, os, json, datetime
 
-C = Console()
-CFG_FILE="config.json"
-CHECK=3
-COOLDOWN=120
-CPU_SUS=4.0
-SUS_LIMIT=6      # 6*3s=18s
+CFG="config.json"
+CHECK=6
+COOLDOWN=90
 FOCUS_DELAY=0.7
 
-def sh(cmd, t=10):
-    try: return subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, timeout=t).decode(errors="ignore").strip()
-    except: return ""
+WORDS_REJOIN = [
+    "reconnect","reconnecting","disconnected","connection lost","lost connection",
+    "reconectar","desconectado","tentar novamente","retry"
+]
+WORDS_HOME = ["home","discover","avatar","friends","search","pesquisar"]
+WORDS_KEY  = ["welcome back","enter key","receive key","atlas","key system","continue"]
 
-def adb(cmd, t=10): return sh(f"adb shell {cmd}", t)
+def sh(cmd, t=15):
+    try:
+        return subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, timeout=t).decode(errors="ignore").strip()
+    except:
+        return ""
 
-def cfg_load():
-    d={"vip":"", "wh":"", "close_browser":True, "browsers":["com.android.chrome","com.brave.browser","com.microsoft.emmx"]}
-    if os.path.exists(CFG_FILE):
-        try: d.update(json.load(open(CFG_FILE,"r",encoding="utf-8")))
+def adb(cmd, t=15): return sh(f"adb shell {cmd}", t)
+
+def load():
+    d={"vip":"","wh":""}
+    if os.path.exists(CFG):
+        try: d.update(json.load(open(CFG,"r",encoding="utf-8")))
         except: pass
     return d
 
-def cfg_save(d): json.dump(d, open(CFG_FILE,"w",encoding="utf-8"), indent=2, ensure_ascii=False)
+def save(d): json.dump(d, open(CFG,"w",encoding="utf-8"), indent=2, ensure_ascii=False)
 
-CFG=cfg_load()
-
-def hook(msg):
-    if not CFG["wh"]: return
-    try: requests.post(CFG["wh"], json={"content":msg}, timeout=6)
+def hook(msg, wh):
+    if not wh: return
+    try: subprocess.run(["python","-c",f"import requests;requests.post('{wh}',json={{'content':{msg!r}}},timeout=6)"], timeout=8)
     except: pass
 
 def packages():
     out=adb("pm list packages", 12)
-    return sorted({l.replace("package:","").strip() for l in out.splitlines() if l.startswith("package:") and "roblox" in l.lower()})
-
-def pid(pkg): return adb(f"pidof {pkg}", 5)
-def cpu(pid):
-    if not pid: return 0.0
-    top=adb(f"top -n 1 -p {pid} | grep {pid}", 6)
-    for p in top.split():
-        if "%" in p:
-            try: return float(p.replace("%","").replace(",","."))
-            except: pass
-    return 0.0
+    pk=[]
+    for l in out.splitlines():
+        if l.startswith("package:"):
+            p=l.replace("package:","").strip()
+            if "roblox" in p.lower(): pk.append(p)
+    return sorted(set(pk))
 
 def focus(pkg):
-    # melhor no VSPhone: resolve activity e start
-    res=adb(f"cmd package resolve-activity --brief {pkg}", 8).splitlines()
+    res=adb(f"cmd package resolve-activity --brief {pkg}", 10).splitlines()
     act=res[-1].strip() if res else ""
     if "/" in act: adb(f"am start -n {act}", 12)
     else: adb(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1", 12)
     time.sleep(FOCUS_DELAY)
 
-def ui_xml():
-    adb("uiautomator dump /sdcard/u.xml >/dev/null 2>&1", 12)
-    time.sleep(0.2)
-    return adb("cat /sdcard/u.xml", 8)
+def screenshot_local(name="screen.png"):
+    adb(f"screencap -p /sdcard/{name}", 10)
+    sh(f"adb pull /sdcard/{name} ./{name}", 15)
+    return os.path.exists(f"./{name}")
 
-def close_browsers():
-    if not CFG.get("close_browser", True): return
-    for b in CFG.get("browsers", []): adb(f"am force-stop {b}", 6)
+def ocr_text(img="screen.png"):
+    # OCR rápido
+    sh("rm -f out.txt", 5)
+    sh(f"tesseract {img} out -l eng --psm 6", 25)
+    if os.path.exists("out.txt"):
+        txt=open("out.txt","r",encoding="utf-8",errors="ignore").read().lower()
+        return re.sub(r"\s+"," ",txt)
+    return ""
 
-def start_vip(pkg):
-    vip=CFG["vip"]
-    if not vip: return
+def stop(pkg): adb(f"am force-stop {pkg}", 10)
+
+def start_vip(pkg, vip):
     out=adb(f"am start -n {pkg}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d '{vip}'", 15)
     if "Error" in out or "Exception" in out:
         adb(f"am start -a android.intent.action.VIEW -d '{vip}'", 15)
-    time.sleep(1.5)
-
-def restart(pkg, reason):
-    hook(f"🔄 `{pkg.split('.')[-1]}` -> {reason}")
-    adb(f"am force-stop {pkg}", 10)
-    time.sleep(1)
-    close_browsers()
-    start_vip(pkg)
-
-def detect_bubble(xml):
-    # “bolha” costuma ter número 1..10 em texto visível no overlay
-    # Pegamos textos do XML e vemos se existe um text="1"..."10"
-    # (isso não é perfeito mas funciona no seu caso)
-    nums=set(str(i) for i in range(1,11))
-    for t in re.findall(r'text="([^"]*)"', xml):
-        if t.strip() in nums:
-            return True
-    return False
-
-def detect_state(xml):
-    x=xml.lower()
-    if any(w in x for w in ["disconnected","connection lost","reconnect","reconectar","retry"]): return "DISCONNECTED"
-    if "home" in x and "discover" in x and ("avatar" in x or "friends" in x): return "HOME"
-    if any(w in x for w in ["welcome back","enter key","receive key","atlas","key system"]): return "KEY"
-    return "OK"
-
-def try_fix_bubble():
-    # tenta “desbolhar” sem tap no meio (pra não chamar teclado)
-    adb("input keyevent 4", 4)    # BACK
-    time.sleep(0.2)
-    adb("input keyevent 187", 4)  # APP_SWITCH
-    time.sleep(0.4)
-    adb("input keyevent 187", 4)  # volta
-    time.sleep(0.4)
-
-class Inst:
-    def __init__(s,p):
-        s.p=p; s.pid=""; s.cpu=0; s.sus=0; s.cd=0; s.st="INIT"; s.last="..."
-    def tick(s):
-        now=time.time()
-        if now<s.cd: s.st="SYNC"; s.sus=0; return
-        s.pid=pid(s.p)
-        s.cpu=cpu(s.pid) if s.pid else 0.0
-        if not s.pid: s.st="DEAD"; s.sus=SUS_LIMIT
-        elif s.cpu>12: s.st="OK"; s.sus=0
-        elif s.cpu<CPU_SUS: s.sus+=1; s.st="SUS" if s.sus>=SUS_LIMIT else "LOW"
-        else: s.st="LOW"
-
-def hud(insts):
-    t=Table(title="REJOIN COMPACTO • Anti-Bolha", expand=True)
-    t.add_column("PKG"); t.add_column("PID"); t.add_column("CPU", justify="right"); t.add_column("SUS", justify="right"); t.add_column("ST")
-    for i in insts:
-        name=i.p.split(".")[-1]
-        t.add_row(name, (i.pid or "-")[:7], f"{i.cpu:.1f}%", f"{i.sus}/{SUS_LIMIT}", i.st)
-    return t
+    time.sleep(2)
 
 def main():
-    if not CFG["vip"]:
-        CFG["vip"]=input("Cole VIP link (roblox:// ou https://): ").strip()
-        CFG["wh"]=input("Webhook (opcional): ").strip()
-        cfg_save(CFG)
+    cfg=load()
+    if not cfg["vip"]:
+        cfg["vip"]=input("Cole VIP link: ").strip()
+        cfg["wh"]=input("Webhook (opcional): ").strip()
+        save(cfg)
 
     pkgs=packages()
     if not pkgs:
-        print("Nenhum pacote roblox encontrado.")
+        print("Sem pacotes roblox.")
         return
+    print("Pacotes:", pkgs)
 
-    insts=[Inst(p) for p in pkgs]
-    next_check=0
+    cd={p:0 for p in pkgs}
 
-    with Live(hud(insts), refresh_per_second=2, screen=True) as live:
-        while True:
-            for i in insts:
-                i.tick()
+    while True:
+        for p in pkgs:
+            if time.time()<cd[p]: 
+                continue
 
-                # só age quando SUS/DEAD
-                if i.sus>=SUS_LIMIT and time.time()>=i.cd:
-                    focus(i.p)
-                    xml=ui_xml()
+            focus(p)
 
-                    # bolha detectada -> tenta desbolhar -> recheck
-                    if xml and detect_bubble(xml):
-                        try_fix_bubble()
-                        time.sleep(0.4)
-                        xml=ui_xml()
+            if not screenshot_local("r.png"):
+                continue
 
-                    state=detect_state(xml or "")
-                    if state in ["DISCONNECTED","HOME"]:
-                        restart(i.p, state)
-                        i.cd=time.time()+COOLDOWN
-                        i.sus=0
-                    elif state=="KEY":
-                        hook(f"🔑 `{i.p.split('.')[-1]}` -> KEY DETECTADA")
-                        # opcional: se quiser reentrar ao invés de esperar:
-                        # restart(i.p,"KEY")
-                        i.cd=time.time()+15
-                        i.sus=0
-                    else:
-                        # se UI veio vazia ou ficou bolha, força restart
-                        if not xml or len(xml)<200:
-                            restart(i.p, "UI_FAIL/BUBBLE")
-                            i.cd=time.time()+COOLDOWN
-                        i.sus=0
+            txt=ocr_text("r.png")
+            if not txt:
+                # OCR falhou -> não faz nada
+                continue
 
-            live.update(hud(insts))
-            time.sleep(CHECK)
+            if any(w in txt for w in WORDS_REJOIN):
+                print("REJOIN:", p)
+                stop(p); time.sleep(1)
+                start_vip(p, cfg["vip"])
+                cd[p]=time.time()+COOLDOWN
+            elif sum(1 for w in WORDS_HOME if w in txt) >= 2:
+                print("HOME:", p)
+                stop(p); time.sleep(1)
+                start_vip(p, cfg["vip"])
+                cd[p]=time.time()+COOLDOWN
+            elif any(w in txt for w in WORDS_KEY):
+                print("KEY/CONTINUE:", p)
+                # aqui você pode clicar ou só avisar
+                # hook(f"🔑 KEY/CONTINUE em {p}", cfg["wh"])
+                cd[p]=time.time()+20
+
+        time.sleep(CHECK)
 
 if __name__=="__main__":
     main()
