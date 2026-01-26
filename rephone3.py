@@ -243,15 +243,21 @@ def stop_app(pkg):
 
 def start_app_with_vip(pkg, vip_link):
     """
-    Inicia o Roblox com o link VIP usando a Activity correta.
-    Usa am start -n com ActivityProtocolLaunch para foco limpo.
+    Inicia o Roblox primeiro, espera 5 segundos, e depois abre o link VIP.
+    Não fecha o app que já está aberto.
     """
-    # Activity correta para abrir links do Roblox
-    activity = f"{pkg}/com.roblox.client.ActivityProtocolLaunch"
+    # Passo 1: Abre o app Roblox primeiro (sem o link)
+    activity_splash = f"{pkg}/com.roblox.client.startup.ActivitySplash"
+    cmd_open = f"am start -n {activity_splash}"
+    adb(cmd_open)
     
-    # Comando correto com Activity específica
-    cmd = f"am start -n {activity} -a android.intent.action.VIEW -d '{vip_link}'"
-    adb(cmd)
+    # Passo 2: Espera 5 segundos para o app carregar
+    time.sleep(5)
+    
+    # Passo 3: Abre o link VIP (sem fechar o app)
+    activity_protocol = f"{pkg}/com.roblox.client.ActivityProtocolLaunch"
+    cmd_vip = f"am start -n {activity_protocol} -a android.intent.action.VIEW -d '{vip_link}'"
+    adb(cmd_vip)
 
 def bring_to_focus(pkg):
     """
