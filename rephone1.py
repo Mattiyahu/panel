@@ -210,16 +210,46 @@ def detect_disconnected(xml):
     return any(ind in xml_lower for ind in indicators)
 
 def detect_home_screen(xml):
-    """Detecta se está na tela inicial do Roblox (não no jogo)"""
+    """
+    Detecta se esta na tela inicial do Roblox (nao no jogo).
+    Se detectar, precisa fechar e reabrir com o link VIP.
+    """
     xml_lower = xml.lower()
-    # Indicadores da tela home do Roblox
-    home_indicators = ["home", "avatar", "charts", "friends", "criar conta", "let's check your age"]
-    game_indicators = ["chat", "inventory", "settings"]  # Indicadores de estar no jogo
     
-    has_home = any(ind in xml_lower for ind in home_indicators)
-    has_game = any(ind in xml_lower for ind in game_indicators)
+    # Indicadores FORTES da tela home do Roblox (lobby/menu principal)
+    home_indicators = [
+        "home",
+        "avatar",
+        "charts",
+        "friends",
+        "criar conta",
+        "check your age",
+        "continue playing",
+        "recommended",
+        "recomendados",
+        "discover",
+        "search",
+        "pesquisar",
+        "destaques",
+    ]
     
-    return has_home and not has_game
+    # Indicadores de que esta DENTRO de um jogo (nao na home)
+    game_indicators = [
+        "backpack",
+        "leaderboard",
+        "leave",
+        "reset character",
+        "honey",
+        "hive",
+        "bee",
+    ]
+    
+    # Conta quantos indicadores de home foram encontrados
+    home_count = sum(1 for ind in home_indicators if ind in xml_lower)
+    game_count = sum(1 for ind in game_indicators if ind in xml_lower)
+    
+    # Se tem 2+ indicadores de home e nenhum de jogo, esta na home
+    return home_count >= 2 and game_count == 0
 
 # ═══════════════════════════════════════════════════════════════════
 # WEBHOOK
