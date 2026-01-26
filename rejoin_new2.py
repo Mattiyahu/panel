@@ -19,22 +19,26 @@ from rich import print as rprint
 # Configurações Globais
 console = Console()
 CONFIG_FILE = "config.json"
-CHECK_INTERVAL = 5  # Reduzido para ser mais rápido
-COOLDOWN_TIME = 120 # 2 minutos de estabilização
+CHECK_INTERVAL = 5
+COOLDOWN_TIME = 120
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
     return {"vip_link": "", "webhook_url": ""}
 
 def save_config(config_data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=4)
 
-config = load_config()
-VIP_LINK = config.get("vip_link", "")
-WEBHOOK_URL = config.get("webhook_url", "")
+# Inicialização segura das variáveis
+_config = load_config()
+VIP_LINK = _config.get("vip_link", "")
+WEBHOOK_URL = _config.get("webhook_url", "")
 
 class InstanceMonitor:
     def __init__(self, package, manager):
@@ -44,9 +48,8 @@ class InstanceMonitor:
         self.cpu = 0.0
         self.net_status = "WAIT"
         self.status_code = "STARTING"
-        self.last_net_bytes = 0
         self.error_count = 0
-        self.cooldown_until = time.time() + 10 # Pequeno delay inicial
+        self.cooldown_until = time.time() + 10
         self.is_running = True
 
     def run_adb(self, command):
@@ -57,7 +60,6 @@ class InstanceMonitor:
             return ""
 
     def update_stats(self):
-        # 1. Verifica PID
         self.pid = self.run_adb(f"pidof {self.package}")
         if not self.pid:
             self.cpu = 0.0
@@ -65,7 +67,6 @@ class InstanceMonitor:
             self.status_code = "CRASHED"
             return
 
-        # 2. Verifica CPU (Agressivo)
         top_out = self.run_adb(f"top -n 1 -p {self.pid} | grep {self.pid}")
         if top_out:
             try:
@@ -74,12 +75,6 @@ class InstanceMonitor:
                     if "%" in p: self.cpu = float(p.replace("%", "").replace(",", "."))
             except: pass
 
-        # 3. Verifica Rede (Heartbeat Real)
-        # Usando dumpsys netstats para ver tráfego recente
-        net_out = self.run_adb(f"cat /proc/net/xt_qtaguid/stats | grep {self.package}")
-        # Se falhar por nome, tenta por UID (mais complexo, vamos simplificar no top)
-        # Como alternativa, vamos usar a variação de CPU e UI
-        
         if time.time() < self.cooldown_until:
             self.status_code = "SYNCING"
         elif self.cpu > 30.0:
@@ -93,23 +88,18 @@ class InstanceMonitor:
     def monitor_logic(self):
         while self.is_running:
             if not self.manager.global_running: break
-            
             self.update_stats()
-            
-            # Lógica de Ação Real
             if time.time() > self.cooldown_until:
                 if not self.pid:
                     self.reboot("Process Lost")
-                elif self.cpu < 10.0: # Se a CPU estiver muito baixa, algo está errado
+                elif self.cpu < 10.0:
                     self.error_count += 1
-                    if self.error_count >= 6: # ~30 segundos de inatividade real
+                    if self.error_count >= 6:
                         self.reboot("Inactivity")
                 else:
-                    # Verificação de UI para erros de conexão
                     ui = self.run_adb("uiautomator dump /sdcard/view.xml > /dev/null 2>&1 && cat /sdcard/view.xml").lower()
                     if any(x in ui for x in ["disconnected", "desconectado", "reconnect"]):
                         self.reboot("Link Break")
-            
             time.sleep(CHECK_INTERVAL)
 
     def reboot(self, reason):
@@ -117,6 +107,7 @@ class InstanceMonitor:
         self.manager.send_webhook(f"📡 **RE_PHONE**: `{self.package}` reiniciado por `{reason}`")
         self.run_adb(f"am force-stop {self.package}")
         time.sleep(2)
+        # Uso de aspas simples para proteger o link no shell
         self.run_adb(f"am start -a android.intent.action.VIEW -d '{VIP_LINK}' {self.package}")
         self.cooldown_until = time.time() + COOLDOWN_TIME
         self.error_count = 0
@@ -142,18 +133,14 @@ class RE_PHONE_Manager:
             rprint("[red]❌ Configure o VIP LINK primeiro![/red]")
             time.sleep(2)
             return
-
         self.global_running = True
         output = subprocess.run("adb shell pm list packages roblox", shell=True, capture_output=True, text=True).stdout
         packages = [line.replace("package:", "").strip() for line in output.splitlines() if "roblox" in line]
-        
         for pkg in packages:
             if pkg not in self.instances:
                 inst = InstanceMonitor(pkg, self)
                 self.instances[pkg] = inst
                 threading.Thread(target=inst.monitor_logic, daemon=True).start()
-        
-        # HUD EM TEMPO REAL COM ATUALIZAÇÃO FORÇADA
         with Live(self.make_hud(), refresh_per_second=4, screen=True) as live:
             try:
                 while self.global_running:
@@ -169,27 +156,17 @@ class RE_PHONE_Manager:
             Layout(name="body", size=12),
             Layout(name="footer", size=10)
         )
-        
         layout["header"].update(Panel(Align.center("[bold cyan]RE_PHONE HUD[/bold cyan] [white]by MSA[/white]"), border_style="cyan"))
-        
         table = Table(expand=True, border_style="magenta", header_style="bold white")
         table.add_column("CLONE", style="green", justify="left")
         table.add_column("CPU %", justify="center")
         table.add_column("NETWORK", justify="center")
         table.add_column("STATUS", justify="center")
-        
         for pkg, inst in self.instances.items():
             name = pkg.split('.')[-1].upper()
             cpu_color = "green" if inst.cpu > 50 else "yellow" if inst.cpu > 10 else "red"
             net_color = "cyan" if inst.net_status == "ACTIVE" else "red"
-            
-            table.add_row(
-                f"[bold]{name}[/bold]",
-                f"[{cpu_color}]{inst.cpu}%[/{cpu_color}]",
-                f"[{net_color}]{inst.net_status}[/{net_color}]",
-                f"[bold white]{inst.status_code}[/bold white]"
-            )
-            
+            table.add_row(f"[bold]{name}[/bold]", f"[{cpu_color}]{inst.cpu}%[/{cpu_color}]", f"[{net_color}]{inst.net_status}[/{net_color}]", f"[bold white]{inst.status_code}[/bold white]")
         layout["body"].update(Panel(table, title="[bold yellow]LIVE ACTIVITY[/bold yellow]", border_style="magenta"))
         layout["footer"].update(Panel(Text("\n".join(self.logs)), title="[bold cyan]SYSTEM LOGS[/bold cyan]", border_style="cyan"))
         return layout
@@ -197,6 +174,7 @@ class RE_PHONE_Manager:
 manager = RE_PHONE_Manager()
 
 def main_menu():
+    global VIP_LINK, WEBHOOK_URL
     while True:
         console.clear()
         banner = """[bold cyan]
@@ -206,28 +184,18 @@ def main_menu():
     ██╔══██╗██╔══╝  ╚════╝██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║██╔══╝  
     ██║  ██║███████╗      ██║     ██║  ██║╚██████╔╝██║ ╚████║███████╗
     ╚═╝  ╚═╝╚══════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝[/bold cyan]
-    [white]                      by MSA | v4.0 Ultra-Realtime[/white]"""
+    [white]                      by MSA | v4.1 Fixed[/white]"""
         rprint(Align.center(banner))
-        
         status = f"🔗 VIP: {'[green]OK[/green]' if VIP_LINK else '[red]NO[/red]'} | ⚓ WEBHOOK: {'[green]OK[/green]' if WEBHOOK_URL else '[red]NO[/red]'}"
         rprint(Panel(Align.center(status), border_style="white"))
-
         grid = Table.grid(expand=True, padding=1)
         grid.add_column(ratio=1); grid.add_column(ratio=1)
-        grid.add_row(
-            Panel("[bold green][1] 🚀 LAUNCH REAL-TIME HUD[/bold green]", border_style="green"),
-            Panel("[bold magenta][2] ⚙️ SYSTEM SETTINGS[/bold magenta]", border_style="magenta")
-        )
-        grid.add_row(
-            Panel("[bold blue][3] 🛠️ ADVANCED TOOLS[/bold blue]", border_style="blue"),
-            Panel("[bold red][0] ❌ EXIT SYSTEM[/bold red]", border_style="red")
-        )
+        grid.add_row(Panel("[bold green][1] 🚀 LAUNCH REAL-TIME HUD[/bold green]", border_style="green"), Panel("[bold magenta][2] ⚙️ SYSTEM SETTINGS[/bold magenta]", border_style="magenta"))
+        grid.add_row(Panel("[bold blue][3] 🛠️ ADVANCED TOOLS[/bold blue]", border_style="blue"), Panel("[bold red][0] ❌ EXIT SYSTEM[/bold red]", border_style="red"))
         rprint(grid)
-        
         choice = Prompt.ask("\n[bold white]Action[/bold white]", choices=["1", "2", "3", "0"])
         if choice == "1": manager.start_monitoring()
         elif choice == "2":
-            global VIP_LINK, WEBHOOK_URL
             console.clear()
             rprint(Panel("[bold magenta]SYSTEM SETTINGS[/bold magenta]", border_style="magenta"))
             VIP_LINK = Prompt.ask("VIP Link", default=VIP_LINK)
