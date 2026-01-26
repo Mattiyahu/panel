@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
+from rich.layout import Layout
 from rich.live import Live
 from rich.text import Text
 from rich.align import Align
@@ -18,8 +19,8 @@ from rich import print as rprint
 # Configurações Globais
 console = Console()
 CONFIG_FILE = "config.json"
-CHECK_INTERVAL = 2  # Monitoramento ultra-rápido
-COOLDOWN_TIME = 120 # Tempo de estabilização
+CHECK_INTERVAL = 3
+COOLDOWN_TIME = 150
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -38,7 +39,6 @@ VIP_LINK = _config.get("vip_link", "")
 WEBHOOK_URL = _config.get("webhook_url", "")
 
 class RobloxInstance:
-    """Representa uma instância isolada do Roblox"""
     def __init__(self, package, manager):
         self.package = package
         self.manager = manager
@@ -52,20 +52,16 @@ class RobloxInstance:
 
     def adb(self, cmd):
         try:
-            # Execução direta e rápida
             return subprocess.check_output(f"adb shell {cmd}", shell=True, stderr=subprocess.STDOUT, timeout=3).decode().strip()
         except: return ""
 
     def update(self):
-        # 1. Verifica se o processo existe
         self.pid = self.adb(f"pidof {self.package}")
-        
         if not self.pid:
             self.cpu = 0.0
             self.status = "STOPPED"
             return
 
-        # 2. Pega CPU de forma instantânea
         try:
             top = self.adb(f"top -n 1 -p {self.pid} | grep {self.pid}")
             if top:
@@ -76,7 +72,6 @@ class RobloxInstance:
                         break
         except: self.cpu = 0.0
 
-        # 3. Define Status
         if time.time() < self.cooldown_until:
             self.status = "STABILIZING"
         elif self.cpu > 10.0:
@@ -88,34 +83,28 @@ class RobloxInstance:
     def monitor_loop(self):
         while self.is_running and self.manager.global_running:
             self.update()
-            
-            # Ações sem delay se não estiver em cooldown
             if time.time() > self.cooldown_until:
                 if not self.pid:
                     self.relaunch("Process Missing")
                 elif self.cpu < 5.0:
                     self.error_streak += 1
-                    if self.error_streak >= 10: # ~20 segundos de inatividade real
+                    if self.error_streak >= 12:
                         self.relaunch("Low Activity")
                 else:
-                    # Checagem de UI rápida para desconexão
+                    self.error_streak = 0
                     if self.error_streak % 5 == 0:
                         ui = self.adb("uiautomator dump /sdcard/view.xml > /dev/null 2>&1 && cat /sdcard/view.xml").lower()
                         if any(x in ui for x in ["disconnected", "desconectado", "reconnect"]):
                             self.relaunch("Connection Lost")
-            
             time.sleep(CHECK_INTERVAL)
 
     def relaunch(self, reason):
         self.last_action = reason
-        self.manager.add_log(f"[{self.package}] Relaunching: {reason}")
+        self.manager.add_log(f"[{self.package}] Relaunch: {reason}")
         self.manager.send_webhook(f"🔄 **RE_PHONE**: `{self.package}` -> `{reason}`")
-        
-        # ISOLAMENTO: Só mata e abre este pacote específico
         self.adb(f"am force-stop {self.package}")
         time.sleep(1)
         self.adb(f"am start -a android.intent.action.VIEW -d '{VIP_LINK}' {self.package}")
-        
         self.cooldown_until = time.time() + COOLDOWN_TIME
         self.error_streak = 0
 
@@ -128,26 +117,32 @@ class RE_PHONE_v7:
     def add_log(self, msg):
         t = datetime.datetime.now().strftime("%H:%M:%S")
         self.logs.append(f"[{t}] {msg}")
-        if len(self.logs) > 10: self.logs.pop(0)
+        if len(self.logs) > 8: self.logs.pop(0)
 
     def send_webhook(self, msg):
         if WEBHOOK_URL:
             try: requests.post(WEBHOOK_URL, json={"content": msg}, timeout=3)
             except: pass
 
+    def force_portrait(self):
+        """Força a tela em modo retrato (em pé) e desativa rotação automática"""
+        rprint("[bold red]Forçando modo Retrato...[/bold red]")
+        subprocess.run("adb shell settings put system accelerometer_rotation 0", shell=True)
+        subprocess.run("adb shell settings put system user_rotation 0", shell=True)
+
     def start(self):
         if not VIP_LINK:
-            rprint("[red]Error: VIP Link not set![/red]"); time.sleep(2); return
+            rprint("[bold red]Erro: VIP Link não configurado![/bold red]"); time.sleep(2); return
         
+        self.force_portrait()
         self.global_running = True
-        # Detecta pacotes
         try:
             out = subprocess.check_output("adb shell pm list packages roblox", shell=True).decode()
             pkgs = [l.replace("package:", "").strip() for l in out.splitlines() if "roblox" in l]
         except: pkgs = []
 
         if not pkgs:
-            rprint("[red]Error: No Roblox packages found![/red]"); time.sleep(2); return
+            rprint("[bold red]Erro: Nenhum pacote Roblox encontrado![/bold red]"); time.sleep(2); return
 
         for p in pkgs:
             inst = RobloxInstance(p, self)
@@ -163,29 +158,38 @@ class RE_PHONE_v7:
                 self.global_running = False
 
     def render(self):
-        table = Table(title="RE_PHONE v7.0 - Monitoramento em Tempo Real", expand=True, border_style="white")
-        table.add_column("Pacote", style="cyan")
+        # Correção do erro: Definindo o layout explicitamente
+        main_layout = Layout()
+        main_layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body", size=12),
+            Layout(name="footer", size=10)
+        )
+
+        header_text = Text("RE_PHONE v7.1 RED EDITION", style="bold white")
+        main_layout["header"].update(Panel(Align.center(header_text), border_style="red"))
+
+        table = Table(expand=True, border_style="red", header_style="bold red")
+        table.add_column("PACOTE", style="bold white")
         table.add_column("CPU", justify="center")
-        table.add_column("Status", justify="center")
-        table.add_column("Última Ação", justify="center")
+        table.add_column("STATUS", justify="center")
+        table.add_column("AÇÃO", justify="center")
 
         for p, inst in self.instances.items():
-            status_color = "green" if inst.status == "RUNNING" else "yellow" if inst.status == "STABILIZING" else "red"
+            status_color = "bright_green" if inst.status == "RUNNING" else "yellow" if inst.status == "STABILIZING" else "red"
             table.add_row(
-                p.split('.')[-1],
+                p.split('.')[-1].upper(),
                 f"{inst.cpu}%",
                 f"[{status_color}]{inst.status}[/{status_color}]",
                 inst.last_action
             )
 
-        log_panel = Panel("\n".join(self.logs), title="Logs do Sistema", border_style="white")
+        main_layout["body"].update(Panel(table, title="[bold red] MONITORAMENTO [/bold red]", border_style="red"))
         
-        layout = Layout()
-        layout.split_column(
-            Layout(table, size=12),
-            Layout(log_panel, size=12)
-        )
-        return layout
+        log_text = Text("\n".join(self.logs), style="white")
+        main_layout["footer"].update(Panel(log_text, title="[bold red] LOGS [/bold red]", border_style="red"))
+        
+        return main_layout
 
 manager = RE_PHONE_v7()
 
@@ -193,35 +197,47 @@ def main():
     global VIP_LINK, WEBHOOK_URL
     while True:
         console.clear()
-        rprint(Panel(Align.center("[bold]RE_PHONE v7.0 by MSA[/bold]\n[dim]Sistema de Monitoramento Isolado[/dim]"), border_style="white"))
+        banner = """[bold red]
+    ██████╗ ███████╗      ██████╗ ██╗  ██╗ ██████╗ ███╗   ██╗███████╗
+    ██╔══██╗██╔════╝      ██╔══██╗██║  ██║██╔═══██╗████╗  ██║██╔════╝
+    ██████╔╝█████╗  █████╗██████╔╝███████║██║   ██║██╔██╗ ██║█████╗  
+    ██╔══██╗██╔══╝  ╚════╝██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║██╔══╝  
+    ██║  ██║███████╗      ██║     ██║  ██║╚██████╔╝██║ ╚████║███████╗
+    ╚═╝  ╚═╝╚══════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝[/bold red]
+    [white]                      RED EDITION by MSA[/white]"""
+        rprint(Align.center(banner))
         
-        rprint(f"VIP Link: [green]{VIP_LINK[:30]}...[/green]" if VIP_LINK else "VIP Link: [red]Não configurado[/red]")
-        rprint(f"Webhook: [green]Configurado[/green]" if WEBHOOK_URL else "Webhook: [red]Não configurado[/red]")
-        rprint("-" * 40)
+        rprint(Panel(f"VIP: [red]{VIP_LINK[:40]}...[/red]\nWEBHOOK: [red]{'CONFIGURADO' if WEBHOOK_URL else 'PENDENTE'}[/red]", border_style="red"))
         
-        rprint("[1] Iniciar Monitoramento")
-        rprint("[2] Configurações")
-        rprint("[3] Ferramentas ADB")
-        rprint("[0] Sair")
+        grid = Table.grid(expand=True, padding=1)
+        grid.add_column(ratio=1); grid.add_column(ratio=1)
+        grid.add_row(
+            Panel("[bold white][1] 🚀 INICIAR RED HUD[/bold white]", border_style="red"),
+            Panel("[bold white][2] ⚙️ CONFIGURAÇÕES[/bold white]", border_style="red")
+        )
+        grid.add_row(
+            Panel("[bold white][3] 🛠️ FERRAMENTAS[/bold white]", border_style="red"),
+            Panel("[bold white][0] ❌ SAIR[/bold white]", border_style="red")
+        )
+        rprint(grid)
         
-        choice = Prompt.ask("\nOpção", choices=["1", "2", "3", "0"])
+        choice = Prompt.ask("\n[bold red]Ação[/bold red]", choices=["1", "2", "3", "0"])
         
         if choice == "1":
             manager.start()
         elif choice == "2":
-            VIP_LINK = Prompt.ask("Cole o Link VIP", default=VIP_LINK)
-            WEBHOOK_URL = Prompt.ask("Cole o Webhook Discord", default=WEBHOOK_URL)
+            VIP_LINK = Prompt.ask("Link VIP", default=VIP_LINK)
+            WEBHOOK_URL = Prompt.ask("Webhook Discord", default=WEBHOOK_URL)
             save_config({"vip_link": VIP_LINK, "webhook_url": WEBHOOK_URL})
         elif choice == "3":
             console.clear()
-            rprint("[1] Forçar Parada de Todos\n[2] Testar Conexão ADB\n[0] Voltar")
+            rprint(Panel("[bold red]FERRAMENTAS[/bold red]", border_style="red"))
+            rprint("[1] Forçar Modo Retrato (Em pé)\n[2] Parar Todos Roblox\n[0] Voltar")
             sub = Prompt.ask("Opção", choices=["1", "2", "0"])
-            if sub == "1":
-                subprocess.run("adb shell am force-stop com.roblox.client", shell=True) # Exemplo
-                rprint("[green]Comando enviado.[/green]"); time.sleep(1)
+            if sub == "1": manager.force_portrait(); time.sleep(1)
             elif sub == "2":
-                out = subprocess.run("adb devices", shell=True, capture_output=True, text=True).stdout
-                rprint(f"Dispositivos:\n{out}"); Prompt.ask("Pressione Enter")
+                for p in manager.instances.keys(): subprocess.run(f"adb shell am force-stop {p}", shell=True)
+                rprint("[red]Todos parados.[/red]"); time.sleep(1)
         elif choice == "0":
             break
 
