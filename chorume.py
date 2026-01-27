@@ -17,14 +17,10 @@ from rich.align import Align
 from rich import print as rprint
 
 # --- CONFIGURAÇÕES DO SUNA ---
-VERSION = "1.0.2"
+VERSION = "1.0.3 Stable"
 CONFIG_FILE = "suna_config.json"
 CHECK_INTERVAL = 3
 COOLDOWN_TIME = 60 
-
-# Limites dinâmicos
-MIN_RAM_MB = 150.0  
-MIN_CPU_PERCENT = 2.0 
 
 console = Console()
 
@@ -37,7 +33,7 @@ SUNA_ART = """
       /   |   \\     [dim]v{}[/dim]
 [/bold yellow]""".format(VERSION)
 
-# --- SISTEMA DE CONFIGURAÇÃO (SEM VARIAVEIS GLOBAIS SOLTAS) ---
+# --- SISTEMA DE CONFIGURAÇÃO BLINDADO ---
 def load_config():
     default = {"vip_link": "", "webhook_url": ""}
     if os.path.exists(CONFIG_FILE):
@@ -51,7 +47,7 @@ def save_config(data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-# Carregamos a config num dicionário acessível por todo o script
+# Carrega configuração em um dicionário acessível globalmente
 CONF = load_config()
 
 # --- FUNÇÕES ADB ---
@@ -67,38 +63,27 @@ class ADB:
         try:
             mem_info = ADB.run("cat /proc/meminfo")
             total_mem = int(re.search(r"MemTotal:\s+(\d+)", mem_info).group(1)) / 1024
-            
-            global MIN_RAM_MB
-            if total_mem > 6000: MIN_RAM_MB = 350.0
-            elif total_mem > 3000: MIN_RAM_MB = 250.0
-            else: MIN_RAM_MB = 150.0
-                
             return total_mem
         except:
             return 2048.0
 
-    @staticmethod
-    def get_focused_app():
-        try:
-            dump = ADB.run("dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'")
-            return dump
-        except: return ""
-
-# --- CLASSE DE INSTÂNCIA ---
+# --- CLASSE DE INSTÂNCIA (MODO PASSIVO) ---
 class Instance:
     def __init__(self, package, manager):
         self.package = package
         self.manager = manager
         self.pid = None
-        self.cpu = 0.0
-        self.ram = 0.0
+        # Valores iniciais "falsos" para evitar fechamento prematuro
+        self.cpu = 5.0 
+        self.ram = 200.0
         self.status = "STARTING"
         self.last_action = "Init"
-        self.cooldown_until = time.time() + 10
+        self.cooldown_until = time.time() + 20 # 20s de carência inicial
         self.error_streak = 0
         self.is_running = True
 
     def get_stats(self):
+        # 1. Verifica se o PID existe (Se não existir, o jogo fechou mesmo)
         self.pid = ADB.run(f"pidof {self.package}")
         
         if not self.pid:
@@ -108,52 +93,70 @@ class Instance:
             return
 
         try:
+            # Tenta ler estatísticas. Se falhar, mantém os valores anteriores
             top_data = ADB.run(f"top -n 1 -b -p {self.pid}")
+            
+            found_stats = False
             lines = top_data.splitlines()
             for line in lines:
                 if str(self.pid) in line:
                     parts = line.split()
                     for p in parts:
+                        # Tenta pegar CPU
                         if "%" in p: 
-                            self.cpu = float(p.replace("%", ""))
+                            try: self.cpu = float(p.replace("%", ""))
+                            except: pass
+                        # Tenta pegar RAM (Suporte a M e K)
                         if "M" in p and not "%" in p:
-                            self.ram = float(p.replace("M", ""))
-                    
-                    if self.ram == 0.0 and len(parts) > 5:
-                        try:
-                            val = int(parts[-4].replace("K", "")) / 1024
-                            self.ram = val
-                        except: pass
+                            try: self.ram = float(p.replace("M", ""))
+                            except: pass
+                        elif "K" in p:
+                             try: self.ram = float(p.replace("K", "")) / 1024
+                             except: pass
+                    found_stats = True
                     break
-        except: pass
+            
+            # Se o top falhou em ler (comum em alguns Androids), reseta para valores seguros
+            if not found_stats:
+                self.cpu = 5.0 
+                self.ram = 250.0
+                
+        except: 
+            pass
 
     def check_health(self):
+        # Se estiver no tempo de espera inicial, ignora
         if time.time() < self.cooldown_until:
             self.status = "COOLDOWN"
             return
 
+        # CRITÉRIO 1: O processo sumiu do Android?
         if not self.pid:
-            self.relaunch("Processo morreu")
+            self.relaunch("Processo morreu (Crash)")
             return
 
-        if self.ram < MIN_RAM_MB:
+        # CRITÉRIO 2: RAM extremamente baixa (Tela preta ou crash silencioso)
+        # Limite de 50MB é muito seguro. Nenhum jogo roda com menos que isso.
+        if self.ram < 50.0: 
             self.error_streak += 1
             self.status = "LOW MEM"
-        elif self.cpu < MIN_CPU_PERCENT:
+        
+        # CRITÉRIO 3: CPU Zero Absoluto
+        elif self.cpu <= 0.0:
             self.error_streak += 1
-            self.status = "IDLE/FROZEN"
+            self.status = "FROZEN (0% CPU)"
+        
         else:
+            # Se tem qualquer sinal de vida, zera os erros
             self.error_streak = 0
             self.status = "RUNNING"
 
-        if self.error_streak > 2:
-            focused = ADB.get_focused_app()
-            if self.package not in focused and "Launcher" in focused:
-                 self.relaunch("App em Background")
-                 return
-
-        if self.error_streak >= 12: 
-            self.relaunch("Crash/Lag Detectado")
+        # IMPORTANTE: Removida a verificação de "Background/Focus".
+        # Isso permite que clones rodem em segundo plano sem serem fechados.
+        
+        # Precisa dar erro 20 vezes seguidas (~60 segundos) pra reiniciar
+        if self.error_streak >= 20: 
+            self.relaunch("Sem resposta por 60s")
 
     def relaunch(self, reason):
         self.last_action = reason
@@ -161,9 +164,8 @@ class Instance:
         self.manager.webhook(f"☀️ **SUNA**: `{self.package}` reiniciado. Motivo: {reason}")
         
         ADB.run(f"am force-stop {self.package}")
-        time.sleep(1)
+        time.sleep(2)
         
-        # AQUI: Usa o dicionário CONF diretamente
         link = CONF.get("vip_link", "")
         if link:
             ADB.run(f"am start -a android.intent.action.VIEW -d '{link}' {self.package}")
@@ -173,6 +175,8 @@ class Instance:
         self.cooldown_until = time.time() + COOLDOWN_TIME
         self.error_streak = 0
         self.status = "RESTARTING"
+        self.cpu = 5.0
+        self.ram = 200.0
 
     def loop(self):
         while self.is_running and self.manager.running:
@@ -200,7 +204,7 @@ class SunaManager:
         except: pass
 
     def auto_setup(self):
-        rprint("[bold yellow]☀️ Calibrando dispositivo...[/bold yellow]")
+        rprint("[bold yellow]☀️ Conectando ao dispositivo...[/bold yellow]")
         self.device_ram = ADB.get_device_info()
         rprint(f"[cyan]ℹ️ RAM Total Detectada: {self.device_ram:.0f} MB[/cyan]")
         time.sleep(1)
@@ -248,12 +252,13 @@ class SunaManager:
                         if inst.status == "RUNNING": s_style = "bold green"
                         elif inst.status == "COOLDOWN": s_style = "blue"
                         elif "IDLE" in inst.status: s_style = "bold red"
+                        elif "LOW" in inst.status: s_style = "red"
                         else: s_style = "yellow"
 
                         name = p.split('.')[-1].upper()
                         table.add_row(
                             name,
-                            f"{inst.ram:.1f}MB",
+                            f"{inst.ram:.0f}MB",
                             f"{inst.cpu:.1f}%",
                             f"[{s_style}]{inst.status}[/{s_style}]",
                             inst.last_action
@@ -271,12 +276,10 @@ class SunaManager:
 # --- MENU ---
 import datetime
 def main():
-    # NÃO PRECISA MAIS DE GLOBAL
     while True:
         console.clear()
         rprint(Align.center(SUNA_ART))
         
-        # Acessamos direto do dicionário CONF
         v_link = CONF.get("vip_link", "")
         w_url = CONF.get("webhook_url", "")
         
@@ -298,7 +301,6 @@ def main():
                 mgr.start()
         
         elif opt == "2":
-            # Atualizamos o dicionário CONF diretamente
             new_vip = Prompt.ask("Link do Servidor VIP", default=CONF.get("vip_link", ""))
             new_web = Prompt.ask("Webhook Discord (Opcional)", default=CONF.get("webhook_url", ""))
             
