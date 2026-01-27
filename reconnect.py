@@ -1,526 +1,268 @@
 #!/usr/bin/env python3
-"""
-SHEROLINE v1.1 - CORRIGIDO
-Sistema Autônomo de Monitoramento Roblox
-
-Autor: MSA
-Correções: Interface dinâmica, timeouts ADB, detecção robusta de pacotes
-"""
-
 import os
-import sys
-import json
-import time
-import shutil
 import subprocess
-import threading
-import re
-from pathlib import Path
-from typing import Dict
-from datetime import datetime
-from enum import Enum
-from dataclasses import dataclass
+import time
 import requests
+import datetime
+import json
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.prompt import Prompt
+from rich.layout import Layout
+from rich.live import Live
+from rich.text import Text
+from rich.align import Align
+from rich.columns import Columns
+from rich import print as rprint
 
-# ==========================================================
-# RICH
-# ==========================================================
-
-try:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.table import Table
-    from rich.prompt import Prompt
-    from rich.live import Live
-    from rich.text import Text
-    from rich.align import Align
-    from rich.layout import Layout
-    from rich.box import ROUNDED
-    from rich import print as rprint
-except ImportError:
-    os.system(f"{sys.executable} -m pip install -q rich")
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.table import Table
-    from rich.prompt import Prompt
-    from rich.live import Live
-    from rich.text import Text
-    from rich.align import Align
-    from rich.layout import Layout
-    from rich.box import ROUNDED
-    from rich import print as rprint
-
+# Configurações Globais
 console = Console()
+CONFIG_FILE = "config.json"
+CHECK_INTERVAL = 15
+LOW_CPU_THRESHOLD = 15.0  # Mais tolerante ainda
+MAX_LOWCPU_COUNT = 8      # Espera 2 minutos de CPU baixa
+COOLDOWN_TIME = 150       # 2.5 minutos para estabilizar
 
-# ==========================================================
-# ARQUIVOS
-# ==========================================================
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    return {"vip_link": "", "webhook_url": "", "auto_execute": ""}
 
-BASE_DIR = Path(__file__).parent
-LINKS_FILE = BASE_DIR / "links.json"
+def save_config(config_data):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config_data, f, indent=4)
 
-# ==========================================================
-# ESTADOS
-# ==========================================================
+config = load_config()
+VIP_LINK = config.get("vip_link", "")
+WEBHOOK_URL = config.get("webhook_url", "")
+AUTO_EXECUTE = config.get("auto_execute", "")
 
-class RobloxState(Enum):
-    CLOSED = "Fechado"
-    HOME = "Inicial"
-    LOADING = "Carregando"
-    IN_GAME = "Ativo"
+class RobloxManager:
+    def __init__(self):
+        self.packages = []
+        self.lowcpu_count = {}
+        self.cooldowns = {}
+        self.is_running = False
+        self.logs = []
 
-# ==========================================================
-# CONFIG
-# ==========================================================
+    def add_log(self, msg, style="white"):
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        self.logs.append(f"[{timestamp}] {msg}")
+        if len(self.logs) > 15:
+            self.logs.pop(0)
 
-@dataclass
-class Config:
-    check_interval: int = 3
-    ram_active_min: int = 1200
-    cpu_idle_max: float = 3.0
-    adb_timeout: int = 8  # Timeout global para comandos ADB
-
-CFG = Config()
-
-# ==========================================================
-# LINKS
-# ==========================================================
-
-def load_links():
-    if not LINKS_FILE.exists():
-        LINKS_FILE.write_text(json.dumps({
-            "server_link": "",
-            "webhook_url": ""
-        }, indent=4), encoding="utf-8")
-
-    with open(LINKS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_links(data):
-    with open(LINKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-LINKS = load_links()
-
-# ==========================================================
-# AUTO SETUP ADB
-# ==========================================================
-
-def adb_cmd(cmd, timeout=CFG.adb_timeout):
-    try:
-        r = subprocess.run(
-            ["adb"] + cmd,
-            capture_output=True,
-            timeout=timeout,
-            text=True,
-            encoding='utf-8',
-            errors='ignore'
-        )
-        return r.stdout.strip()
-    except subprocess.TimeoutExpired:
-        console.print(f"[red]⚠ Timeout ADB: {' '.join(cmd)}[/red]")
-        return ""
-    except Exception as e:
-        console.print(f"[red]⚠ Erro ADB: {e}[/red]")
-        return ""
-
-def adb_available():
-    return shutil.which("adb") is not None
-
-def adb_autosetup():
-    rprint("[cyan]Verificando ADB...[/cyan]")
-
-    if not adb_available():
-        rprint("[red]❌ ADB não encontrado no sistema.[/red]")
-        rprint("[yellow]Solução: Instale Android Platform Tools e reinicie o script.[/yellow]")
-        sys.exit(1)
-
-    subprocess.run(["adb", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["adb", "start-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    rprint("[green]✓ Servidor ADB iniciado[/green]")
-
-    # Aguarda no máximo 30 segundos pelo dispositivo
-    for _ in range(15):
-        out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
-        lines = [l for l in out.strip().splitlines() if "device" in l and not l.startswith("List")]
-        if lines:
-            rprint(f"[green]✓ Dispositivo conectado: {lines[0].split()[0]}[/green]")
-            return
-        rprint("[yellow]⏳ Aguardando dispositivo ADB... (pressione Ctrl+C para cancelar)[/yellow]")
-        time.sleep(2)
-    
-    rprint("[red]❌ Tempo esgotado: Nenhum dispositivo encontrado[/red]")
-    sys.exit(1)
-
-# ==========================================================
-# ADB UTILS (com timeouts rigorosos)
-# ==========================================================
-
-def adb_shell(cmd, timeout=CFG.adb_timeout):
-    return adb_cmd(["shell"] + cmd + ["2>/dev/null"], timeout=timeout)
-
-def get_packages():
-    out = adb_shell(["pm", "list", "packages"], timeout=10)
-    packages = []
-    for line in out.splitlines():
-        pkg = line.replace("package:", "").strip()
-        # Detecção robusta: case-insensitive + nomes alternativos
-        if any(k in pkg.lower() for k in ["roblox", "rbx", "com.roblox"]):
-            packages.append(pkg)
-    return packages
-
-def get_pid(pkg):
-    return adb_shell(["pidof", pkg], timeout=3)
-
-def get_cpu(pid):
-    if not pid or not pid.strip().isdigit():
-        return 0.0
-    out = adb_shell(["top", "-n", "1", "-p", pid], timeout=4)
-    for p in out.split():
-        if "%" in p:
-            try:
-                return float(p.replace("%", "").replace(",", "."))
-            except:
-                pass
-    return 0.0
-
-def get_ram(pid):
-    if not pid or not pid.strip().isdigit():
-        return 0
-    out = adb_shell(["dumpsys", "meminfo", pid], timeout=5)
-    m = re.search(r"TOTAL\s+(\d+)", out)
-    return int(m.group(1)) // 1024 if m else 0
-
-def stop_app(pkg):
-    adb_shell(["am", "force-stop", pkg], timeout=3)
-
-def start_app_link(pkg, link):
-    adb_shell(["am", "start", "-a", "android.intent.action.VIEW", "-d", f'"{link}"'], timeout=4)
-
-# ==========================================================
-# SCREENSHOT
-# ==========================================================
-
-def capture_screenshot(path):
-    try:
-        remote = f"/sdcard/sc_{int(time.time()*1000)}.png"
-        subprocess.run(["adb", "shell", "screencap", "-p", remote], timeout=4, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["adb", "pull", remote, path], timeout=6, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["adb", "shell", "rm", remote], timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return Path(path).exists()
-    except Exception as e:
-        console.print(f"[red]⚠ Falha no screenshot: {e}[/red]")
-        return False
-
-# ==========================================================
-# DETECTOR
-# ==========================================================
-
-def detect_state(cpu, ram):
-    if ram == 0:
-        return RobloxState.CLOSED
-    if ram >= CFG.ram_active_min:
-        return RobloxState.IN_GAME
-    if cpu <= CFG.cpu_idle_max:
-        return RobloxState.HOME
-    return RobloxState.LOADING
-
-# ==========================================================
-# WEBHOOK
-# ==========================================================
-
-def send_webhook(msg, screenshot=False):
-    url = LINKS.get("webhook_url")
-    if not url:
-        return
-
-    files = None
-    img = None
-
-    if screenshot:
-        img = BASE_DIR / f"sc_{int(time.time())}.png"
-        if capture_screenshot(str(img)):
-            try:
-                with open(img, "rb") as f:
-                    files = {"file": ("screen.png", f.read(), "image/png")}
-            except:
-                files = None
-
-    payload = {"content": msg}
-
-    try:
-        if files:
-            requests.post(url, data={"payload_json": json.dumps(payload)}, files=files, timeout=8)
-        else:
-            requests.post(url, json=payload, timeout=8)
-    except Exception as e:
-        console.print(f"[red]⚠ Falha no webhook: {e}[/red]")
-
-    if img and img.exists():
+    def run_adb(self, command):
         try:
-            img.unlink()
+            result = subprocess.run(f"adb shell {command}", shell=True, capture_output=True, text=True)
+            return result.stdout.strip()
+        except:
+            return ""
+
+    def get_packages(self):
+        output = self.run_adb("pm list packages roblox")
+        self.packages = [line.replace("package:", "").strip() for line in output.splitlines() if "roblox" in line]
+        for pkg in self.packages:
+            if pkg not in self.lowcpu_count:
+                self.lowcpu_count[pkg] = 0
+                self.cooldowns[pkg] = 0
+        return self.packages
+
+    def send_webhook(self, message):
+        if not WEBHOOK_URL: return
+        try:
+            requests.post(WEBHOOK_URL, json={"content": message}, timeout=5)
         except:
             pass
 
-# ==========================================================
-# INSTÂNCIA
-# ==========================================================
+    def get_cpu_usage(self, pid):
+        output = self.run_adb(f"top -n 1 -p {pid} | grep {pid}")
+        if not output: return 0.0
+        try:
+            parts = output.split()
+            for part in parts:
+                if "%" in part:
+                    return float(part.replace("%", "").replace(",", "."))
+            return float(parts[8].replace(",", "."))
+        except:
+            return 0.0
 
-class Instance:
-    def __init__(self, pkg):
-        self.pkg = pkg
-        self.name = pkg.split(".")[-1].upper()[:10]  # Nome curto para exibição
-        self.pid = ""
-        self.cpu = 0.0
-        self.ram = 0
-        self.state = RobloxState.CLOSED
-        self.cooldown = 0
-        self.lock = threading.Lock()
-
-    def update(self):
-        with self.lock:
-            try:
-                self.pid = get_pid(self.pkg)
-                self.cpu = get_cpu(self.pid) if self.pid else 0.0
-                self.ram = get_ram(self.pid) if self.pid else 0
-                self.state = detect_state(self.cpu, self.ram)
-            except Exception as e:
-                console.print(f"[red]Erro na atualização {self.name}: {e}[/red]")
-
-    def restart(self, reason):
-        with self.lock:
-            self.cooldown = time.time() + 120
-            stop_app(self.pkg)
-            time.sleep(1.0)
-            send_webhook(f"🔄 **{self.name}**: {reason}", True)
-            if LINKS.get("server_link"):
-                start_app_link(self.pkg, LINKS["server_link"])
-            else:
-                console.print("[yellow]⚠ Server Link não configurado - iniciando app normalmente[/yellow]")
-                adb_shell(["monkey", "-p", self.pkg, "-c", "android.intent.category.LAUNCHER", "1"], timeout=3)
-
-# ==========================================================
-# MONITOR
-# ==========================================================
-
-class Monitor:
-    def __init__(self):
-        self.instances: Dict[str, Instance] = {}
-        self.logs = []
-        self.running = False
-        self.lock = threading.Lock()
-
-    def log(self, m):
-        t = datetime.now().strftime("%H:%M:%S")
-        with self.lock:
-            self.logs.append(f"[{t}] {m}")
-            self.logs = self.logs[-15:]  # Mantém últimos 15 logs
-
-    def worker(self, inst):
-        while self.running:
-            try:
-                inst.update()
-                if time.time() > inst.cooldown:
-                    if inst.state in (RobloxState.CLOSED, RobloxState.HOME):
-                        self.log(f"{inst.name}: reiniciando ({inst.state.value})")
-                        inst.restart(inst.state.value)
-            except Exception as e:
-                self.log(f"Erro worker {inst.name}: {e}")
-            time.sleep(CFG.check_interval)
-
-    def start(self):
-        pkgs = get_packages()
-        if not pkgs:
-            rprint("[yellow]⚠ Nenhum pacote do Roblox encontrado no dispositivo[/yellow]")
-            rprint("[dim]Dica: Verifique se o Roblox está instalado e o dispositivo está autorizado[/dim]")
-            time.sleep(3)
-            return
-
-        self.running = True
-        self.instances.clear()
+    def reconnect(self, pkg, reason="Desconhecido"):
+        # ISOLAMENTO: Só reinicia o pacote específico
+        self.add_log(f"🔄 Reiniciando {pkg} | Motivo: {reason}", "cyan")
+        self.send_webhook(f"⚠️ **REJ_PHONE**: Reiniciando `{pkg}`\nMotivo: `{reason}`")
         
-        for p in pkgs:
-            i = Instance(p)
-            i.cooldown = time.time() + 60  # Cooldown inicial para evitar reinícios imediatos
-            self.instances[p] = i
-            threading.Thread(target=self.worker, args=(i,), daemon=True, name=f"Worker-{p}").start()
-            self.log(f"Monitorando: {i.name}")
+        self.run_adb(f"am force-stop {pkg}")
+        time.sleep(3)
+        
+        # Abertura focada
+        cmd = f"am start -a android.intent.action.VIEW -d '{VIP_LINK}' {pkg}"
+        self.run_adb(cmd)
+        
+        # Define cooldown individual longo para evitar re-trigger
+        self.cooldowns[pkg] = time.time() + COOLDOWN_TIME
+        self.lowcpu_count[pkg] = 0
 
-        send_webhook("🚀 Monitor SHEROLINE iniciado")
+    def check_ui_state(self, package):
+        # DETECÇÃO MELHORADA: Ignora 'bubble' se a CPU estiver minimamente ativa
+        ui_xml = self.run_adb("uiautomator dump /sdcard/view.xml > /dev/null 2>&1 && cat /sdcard/view.xml")
+        if not ui_xml: return "ok"
+        
+        ui_lower = ui_xml.lower()
+        if any(x in ui_lower for x in ["disconnected", "desconectado", "connection lost", "reconnect"]):
+            return "disconnected"
+        if all(x in ui_lower for x in ["home", "discover", "avatar"]):
+            return "home"
+        return "ok"
 
-        # Listener para tecla 'Q' sair do monitor
-        def listen_quit():
-            if os.name == 'nt':
-                import msvcrt
-                while self.running:
-                    if msvcrt.kbhit():
-                        key = msvcrt.getch()
-                        if key in [b'q', b'Q']:
-                            self.log("Saindo do monitor (tecla Q)...")
-                            self.running = False
-                    time.sleep(0.1)
-            else:
-                import sys, select
-                while self.running:
-                    if select.select([sys.stdin], [], [], 0.1)[0]:
-                        if sys.stdin.read(1) in ('q', 'Q'):
-                            self.log("Saindo do monitor (tecla Q)...")
-                            self.running = False
+    def monitor_loop(self):
+        if not VIP_LINK:
+            self.add_log("❌ Erro: VIP LINK não configurado!", "red")
+            return
+        
+        self.is_running = True
+        self.get_packages()
+        
+        with Live(self.make_layout(), refresh_per_second=1) as live:
+            while self.is_running:
+                for pkg in self.packages:
+                    if time.time() < self.cooldowns.get(pkg, 0): continue
+                    
+                    pid = self.run_adb(f"pidof {pkg}")
+                    if not pid:
+                        self.reconnect(pkg, "App fechado")
+                        continue
 
-        threading.Thread(target=listen_quit, daemon=True, name="QuitListener").start()
-
-        # Interface DINÂMICA com atualização automática
-        with Live(
-            renderable=lambda: self.render(),  # ← CORREÇÃO PRINCIPAL: callable para atualização contínua
-            refresh_per_second=2,
-            screen=True,
-            transient=False
-        ) as live:
-            self.log(f"Iniciado com {len(pkgs)} instância(s)")
-            while self.running:
-                time.sleep(0.3)  # Pequeno delay para não sobrecarregar CPU
-            
-        # Pós-monitoramento
-        for inst in self.instances.values():
-            stop_app(inst.pkg)
-        self.log("Monitor finalizado")
-        time.sleep(1)
-
-    def render(self):
-        title = Text(
-            """
-███████╗██╗  ██╗███████╗██████╗  ██████╗ ██╗     ██╗███╗   ██╗███████╗
-██╔════╝██║  ██║██╔════╝██╔══██╗██╔═══██╗██║     ██║████╗  ██║██╔════╝
-███████╗███████║█████╗  ██████╔╝██║   ██║██║     ██║██╔██╗ ██║█████╗  
-╚════██║██╔══██║██╔══╝  ██╔══██╗██║   ██║██║     ██║██║╚██╗██║██╔══╝  
-███████║██║  ██║███████╗██║  ██║╚██████╔╝███████╗██║██║ ╚████║███████╗
-╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝╚═╝  ╚═══╝╚══════╝
-        v1.1 - CORRIGIDO
-""",
-            style="bold cyan",
-            justify="center"
-        )
-
-        table = Table(box=ROUNDED, expand=True, border_style="cyan", title="INSTÂNCIAS ROBLOX", title_style="bold yellow")
-        table.add_column("INSTÂNCIA", style="bold green")
-        table.add_column("CPU", justify="right")
-        table.add_column("RAM", justify="right")
-        table.add_column("ESTADO", style="bold cyan")
-
-        with self.lock:
-            if not self.instances:
-                table.add_row("[dim]Nenhuma instância[/dim]", "", "", "")
-            else:
-                for i in self.instances.values():
-                    with i.lock:
-                        cpu_color = "green" if i.cpu < 30 else "yellow" if i.cpu < 70 else "red"
-                        ram_color = "green" if i.ram < 800 else "yellow" if i.ram < 1500 else "red"
-                        state_style = {
-                            RobloxState.CLOSED: "red",
-                            RobloxState.HOME: "yellow",
-                            RobloxState.LOADING: "blue",
-                            RobloxState.IN_GAME: "green"
-                        }.get(i.state, "white")
+                    cpu = self.get_cpu_usage(pid)
+                    
+                    # Só checa UI e CPU se não estiver em cooldown
+                    if cpu < LOW_CPU_THRESHOLD:
+                        self.lowcpu_count[pkg] += 1
+                        if self.lowcpu_count[pkg] >= MAX_LOWCPU_COUNT:
+                            self.reconnect(pkg, f"Inatividade ({cpu}%)")
+                            continue
+                    else:
+                        self.lowcpu_count[pkg] = 0
                         
-                        table.add_row(
-                            i.name,
-                            f"[{cpu_color}]{i.cpu:.1f}%[/{cpu_color}]",
-                            f"[{ram_color}]{i.ram} MB[/{ram_color}]",
-                            f"[{state_style}]{i.state.value}[/{state_style}]"
-                        )
+                        # Se a CPU está alta, o jogo está rodando. 
+                        # Só checa UI para erros críticos (desconexão)
+                        state = self.check_ui_state(pkg)
+                        if state in ["disconnected", "home"]:
+                            self.reconnect(pkg, f"Erro UI: {state}")
+                
+                live.update(self.make_layout())
+                time.sleep(CHECK_INTERVAL)
 
-        with self.lock:
-            logs_text = "\n".join(self.logs) if self.logs else "[dim]Aguardando eventos...[/dim]"
-        logs_panel = Panel(
-            logs_text,
-            title="LOGS (pressione Q para sair)",
-            border_style="cyan",
-            height=10
-        )
-
+    def make_layout(self):
         layout = Layout()
         layout.split_column(
-            Layout(Align.center(title), size=11),
-            Layout(table, size=8 + len(self.instances)),
-            Layout(logs_panel, size=11)
+            Layout(name="header", size=3),
+            Layout(name="main", size=12),
+            Layout(name="footer", size=16)
         )
+        layout["header"].update(Panel(Align.center("[bold cyan]REJ_PHONE[/bold cyan] [white]by MSA[/white]"), border_style="cyan"))
+        
+        table = Table(expand=True, border_style="blue")
+        table.add_column("Package", style="green")
+        table.add_column("CPU", style="magenta")
+        table.add_column("Status", style="white")
+        table.add_column("Wait", style="yellow")
+        
+        for pkg in self.packages:
+            cd = max(0, int(self.cooldowns.get(pkg, 0) - time.time()))
+            pid = self.run_adb(f"pidof {pkg}")
+            cpu = self.get_cpu_usage(pid) if pid else 0.0
+            
+            status = "[green]Rodando[/green]" if cpu > 50 else "[yellow]Carregando[/yellow]"
+            if cd > 0: status = "[bold blue]Estabilizando[/bold blue]"
+            
+            table.add_row(pkg, f"{cpu}%", status, f"{cd}s" if cd > 0 else f"{self.lowcpu_count[pkg]}/{MAX_LOWCPU_COUNT}")
+            
+        layout["main"].update(Panel(table, title="[bold blue]Live Monitor[/bold blue]", border_style="blue"))
+        layout["footer"].update(Panel(Text("\n".join(self.logs)), title="[bold yellow]System Activity[/bold yellow]", border_style="yellow"))
         return layout
 
-# ==========================================================
-# MAIN
-# ==========================================================
+manager = RobloxManager()
+
+def show_main_menu():
+    console.clear()
+    banner = """[bold cyan]
+    ██████╗ ███████╗      ██████╗ ██╗  ██╗ ██████╗ ███╗   ██╗███████╗
+    ██╔══██╗██╔════╝      ██╔══██╗██║  ██║██╔═══██╗████╗  ██║██╔════╝
+    ██████╔╝█████╗  █████╗██████╔╝███████║██║   ██║██╔██╗ ██║█████╗  
+    ██╔══██╗██╔══╝  ╚════╝██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║██╔══╝  
+    ██║  ██║███████╗      ██║     ██║  ██║╚██████╔╝██║ ╚████║███████╗
+    ╚═╝  ╚═╝╚══════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝[/bold cyan]"""
+    rprint(Align.center(banner))
+    rprint(Align.center("[white]v3.0 - Advanced Multi-Instance Control | by MSA[/white]\n"))
+
+    menu = Table.grid(expand=True, padding=1)
+    menu.add_column(ratio=1); menu.add_column(ratio=1)
+    menu.add_row(
+        Panel("[bold green][1] 🚀 START MONITOR[/bold green]\n[dim]Inicia o Rejoin Inteligente[/dim]", border_style="green"),
+        Panel("[bold magenta][2] ⚙️ CONFIGURATIONS[/bold magenta]\n[dim]VIP, Webhook, Auto-Exec[/dim]", border_style="magenta")
+    )
+    menu.add_row(
+        Panel("[bold blue][3] 🛠️ ADVANCED TOOLS[/bold blue]\n[dim]Setup, ADB, Shell[/dim]", border_style="blue"),
+        Panel("[bold yellow][4] 📋 INSTANCE INFO[/bold yellow]\n[dim]Listar clones e PIDs[/dim]", border_style="yellow")
+    )
+    menu.add_row(
+        Panel("[bold red][0] ❌ EXIT[/bold red]\n[dim]Fechar o painel[/dim]", border_style="red"),
+        Panel("[bold white][?] HELP[/bold white]\n[dim]Suporte e Dicas[/dim]", border_style="white")
+    )
+    rprint(menu)
+
+def sub_menu_configs():
+    global VIP_LINK, WEBHOOK_URL, AUTO_EXECUTE
+    while True:
+        console.clear()
+        rprint(Panel("[bold magenta]⚙️ CONFIGURATIONS[/bold magenta]", border_style="magenta"))
+        rprint(f"[1] Edit VIP Link [dim]({VIP_LINK[:20]}...)[/dim]")
+        rprint(f"[2] Edit Webhook URL [dim]({WEBHOOK_URL[:20]}...)[/dim]")
+        rprint(f"[3] Auto-Execute Script [dim]({AUTO_EXECUTE})[/dim]")
+        rprint("[0] Back")
+        
+        c = Prompt.ask("\nSelect", choices=["1", "2", "3", "0"])
+        if c == "1": VIP_LINK = Prompt.ask("VIP Link")
+        elif c == "2": WEBHOOK_URL = Prompt.ask("Webhook URL")
+        elif c == "3": AUTO_EXECUTE = Prompt.ask("Script Name (ex: main.lua)")
+        elif c == "0": break
+        save_config({"vip_link": VIP_LINK, "webhook_url": WEBHOOK_URL, "auto_execute": AUTO_EXECUTE})
+
+def sub_menu_tools():
+    while True:
+        console.clear()
+        rprint(Panel("[bold blue]🛠️ ADVANCED TOOLS[/bold blue]", border_style="blue"))
+        rprint("[1] Run Auto-Setup (Dependencies)")
+        rprint("[2] ADB Connect (Wireless)")
+        rprint("[3] Force Stop All Roblox")
+        rprint("[4] Clear System Logs")
+        rprint("[0] Back")
+        
+        c = Prompt.ask("\nSelect", choices=["1", "2", "3", "4", "0"])
+        if c == "1": subprocess.run("bash setup.sh", shell=True); Prompt.ask("Enter to return")
+        elif c == "2": ip = Prompt.ask("Device IP"); subprocess.run(f"adb connect {ip}", shell=True); Prompt.ask("Enter to return")
+        elif c == "3": 
+            for p in manager.get_packages(): manager.run_adb(f"am force-stop {p}")
+            rprint("[red]Todos parados![/red]"); time.sleep(1)
+        elif c == "4": manager.logs = []; rprint("[green]Logs limpos![/green]"); time.sleep(1)
+        elif c == "0": break
 
 def main():
-    try:
-        adb_autosetup()
-    except KeyboardInterrupt:
-        rprint("\n[yellow]Cancelado pelo usuário[/yellow]")
-        sys.exit(0)
-    
-    mon = Monitor()
-
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
-        rprint("[bold cyan]SHEROLINE v1.1[/bold cyan] - Sistema de Monitoramento Roblox\n")
-        rprint("1 - Iniciar monitoramento")
-        rprint("2 - Configurar Webhook Discord")
-        rprint("3 - Configurar Server Link")
-        rprint("4 - Testar conexão ADB")
-        rprint("0 - Sair\n")
-        
-        try:
-            c = Prompt.ask("[bold green]Escolha uma opção[/bold green]", choices=["0", "1", "2", "3", "4"], default="1")
-        except KeyboardInterrupt:
-            break
-
-        if c == "1":
-            if not LINKS.get("server_link"):
-                rprint("[red]⚠ Server Link não configurado! Configure na opção 3.[/red]")
-                time.sleep(2)
-                continue
-            mon.start()
-        elif c == "2":
-            url = Prompt.ask("Cole a URL do Webhook Discord", default=LINKS.get("webhook_url", ""))
-            if url.startswith("https://discord.com/api/webhooks/"):
-                LINKS["webhook_url"] = url
-                save_links(LINKS)
-                rprint("[green]✓ Webhook salvo com sucesso[/green]")
-            else:
-                rprint("[red]⚠ URL inválida (deve começar com https://discord.com/api/webhooks/)[/red]")
-            time.sleep(2)
-        elif c == "3":
-            link = Prompt.ask("Cole o Server Link do Roblox", default=LINKS.get("server_link", ""))
-            if "roblox.com" in link or "rbx" in link:
-                LINKS["server_link"] = link
-                save_links(LINKS)
-                rprint("[green]✓ Server Link salvo com sucesso[/green]")
-            else:
-                rprint("[yellow]⚠ Link pode não ser válido (deve conter 'roblox.com' ou 'rbx')[/yellow]")
-            time.sleep(2)
-        elif c == "4":
-            rprint("[cyan]Testando conexão ADB...[/cyan]")
-            pkgs = get_packages()
-            if pkgs:
-                rprint(f"[green]✓ Dispositivo conectado[/green]")
-                rprint(f"[green]✓ Pacotes encontrados: {', '.join(pkgs)}[/green]")
-            else:
-                rprint("[red]✗ Nenhum pacote Roblox encontrado[/red]")
-                rprint("[dim]Verifique se o Roblox está instalado no dispositivo[/dim]")
-            time.sleep(3)
-        elif c == "0":
-            break
-
-    rprint("\n[bold cyan]SHEROLINE finalizado[/bold cyan]")
+        show_main_menu()
+        choice = Prompt.ask("\n[bold white]Action[/bold white]", choices=["1", "2", "3", "4", "0"])
+        if choice == "1": manager.monitor_loop()
+        elif choice == "2": sub_menu_configs()
+        elif choice == "3": sub_menu_tools()
+        elif choice == "4":
+            pkgs = manager.get_packages()
+            t = Table(title="Detected Clones", border_style="cyan")
+            t.add_column("ID"); t.add_column("Package"); t.add_column("PID")
+            for i, p in enumerate(pkgs): t.add_row(str(i+1), p, manager.run_adb(f"pidof {p}"))
+            rprint(t); Prompt.ask("\nEnter to return")
+        elif choice == "0": break
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        rprint("\n[yellow]Encerrado pelo usuário[/yellow]")
-        sys.exit(0)
-    except Exception as e:
-        rprint(f"\n[red]❌ Erro fatal: {e}[/red]")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    main()
