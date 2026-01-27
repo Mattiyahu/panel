@@ -17,7 +17,7 @@ from rich.align import Align
 from rich import print as rprint
 
 # --- CONFIGURAÇÕES DO SUNA ---
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 CONFIG_FILE = "suna_config.json"
 CHECK_INTERVAL = 3
 COOLDOWN_TIME = 60 # Tempo para estabilizar após abrir
@@ -122,23 +122,20 @@ class Instance:
             top_data = ADB.run(f"top -n 1 -b -p {self.pid}")
             
             # Regex para pegar CPU% e RAM (RES/RSS)
-            # Formatos de top variam, tentamos pegar o número antes do % ou colunas comuns
             lines = top_data.splitlines()
             for line in lines:
                 if str(self.pid) in line:
                     parts = line.split()
-                    # Geralmente CPU é o penúltimo ou tem %, RAM é RES ou RSS
-                    # Tentativa heurística simples para Android top
                     for p in parts:
                         if "%" in p: 
                             self.cpu = float(p.replace("%", ""))
                         if "M" in p and not "%" in p:
                             self.ram = float(p.replace("M", ""))
                     
-                    # Se não achou 'M', tenta converter colunas (RSS costuma ser a 5ª ou 6ª)
                     if self.ram == 0.0 and len(parts) > 5:
                         try:
                             # Tenta achar valores numéricos grandes que pareçam RAM (em K)
+                            # Normalmente RSS é a coluna 5 ou 6
                             val = int(parts[-4].replace("K", "")) / 1024
                             self.ram = val
                         except: pass
@@ -167,9 +164,9 @@ class Instance:
             self.status = "RUNNING"
 
         # 3. Checa se está em Background (Home)
-        # Fazemos isso menos vezes para economizar recurso
         if self.error_streak > 2:
             focused = ADB.get_focused_app()
+            # Se não estiver focado e não for o Launcher (Home), pode ser anúncio ou crash
             if self.package not in focused and "Launcher" in focused:
                  self.relaunch("App em Background")
                  return
@@ -250,13 +247,11 @@ class SunaManager:
             Layout(name="footer", size=8)
         )
 
-        # Header do Sol
         layout["header"].update(Panel(Align.center(Text.from_markup(SUNA_ART)), border_style="yellow"))
 
         with Live(layout, refresh_per_second=2, screen=True) as live:
             try:
                 while self.running:
-                    # Tabela de Monitoramento
                     table = Table(expand=True, border_style="yellow", header_style="bold yellow")
                     table.add_column("CLONE", style="bold white")
                     table.add_column("RAM (MB)", justify="right")
@@ -265,7 +260,6 @@ class SunaManager:
                     table.add_column("ULT. AÇÃO")
 
                     for p, inst in self.instances.items():
-                        # Cores baseadas no status
                         if inst.status == "RUNNING": s_style = "bold green"
                         elif inst.status == "COOLDOWN": s_style = "blue"
                         elif "IDLE" in inst.status: s_style = "bold red"
@@ -282,7 +276,6 @@ class SunaManager:
 
                     layout["body"].update(Panel(table, title=f"[bold yellow]MONITORAMENTO (Total RAM: {self.device_ram:.0f}MB)[/bold yellow]", border_style="yellow"))
                     
-                    # Logs
                     log_text = "\n".join(self.logs)
                     layout["footer"].update(Panel(log_text, title="LOGS", border_style="white"))
                     
@@ -293,6 +286,9 @@ class SunaManager:
 # --- MENU ---
 import datetime
 def main():
+    # CORREÇÃO AQUI: As variáveis globais devem ser declaradas no início da função
+    global VIP_LINK, WEBHOOK_URL
+    
     while True:
         console.clear()
         rprint(Align.center(SUNA_ART))
@@ -314,13 +310,11 @@ def main():
                 mgr.start()
         
         elif opt == "2":
-            global VIP_LINK, WEBHOOK_URL
             VIP_LINK = Prompt.ask("Link do Servidor VIP", default=VIP_LINK)
             WEBHOOK_URL = Prompt.ask("Webhook Discord (Opcional)", default=WEBHOOK_URL)
             save_config({"vip_link": VIP_LINK, "webhook_url": WEBHOOK_URL})
             
         elif opt == "3":
-             # Ferramentas extras
              rprint("\n[bold yellow]-- FERRAMENTAS --[/bold yellow]")
              rprint("[1] Forçar Modo Retrato (Arruma tela esticada)")
              rprint("[2] Matar todos os Roblox")
@@ -331,7 +325,7 @@ def main():
                  rprint("[green]Tela travada em pé![/green]")
                  time.sleep(1)
              if x == "2":
-                 ADB.run("am kill-all") # Tenta matar tudo
+                 ADB.run("am kill-all")
                  rprint("[red]Comando enviado.[/red]")
                  time.sleep(1)
 
