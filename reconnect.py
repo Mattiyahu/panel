@@ -1,483 +1,950 @@
 #!/usr/bin/env python3
 """
-RE_PHONE RETRO EDITION 🌸
-Sistema de Monitoramento para Roblox - VSPhone
+Roblox Monitor - Professional Edition
+Sistema profissional de monitoramento para Roblox Mobile
 
-Tema: Gradiente Vermelho → Rosa (Retro/Synthwave)
 Funcionalidades:
-- Detecção de tela de key via CPU/RAM
-- Envio de screenshot via webhook quando detectar key
-- Configuração simples: apenas webhook e link do servidor
+- Detecção precisa de estados: Em jogo, Home, Fechado
+- Captura automática de screenshots em eventos importantes
+- Notificações via Discord Webhook
+- Logging estruturado e configuração persistente
+- Monitoramento multi-instância com threads
+
+Autor: Professional Development
+Versão: 2.0.0
 """
+
 import os
-import subprocess
-import time
-import requests
-import datetime
+import sys
 import json
+import time
+import logging
+import subprocess
 import threading
 import re
-import base64
-from io import BytesIO
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from dataclasses import dataclass, asdict
+from enum import Enum
+import requests
+
 
 # ═══════════════════════════════════════════════════════════════════
-# CORES DO TEMA RETRO (Vermelho → Rosa)
+# CONFIGURAÇÕES E CONSTANTES
 # ═══════════════════════════════════════════════════════════════════
-class Colors:
-    # Gradiente Vermelho → Rosa
-    RED = "\033[38;5;196m"
-    RED_LIGHT = "\033[38;5;197m"
-    PINK = "\033[38;5;198m"
-    PINK_LIGHT = "\033[38;5;199m"
-    MAGENTA = "\033[38;5;200m"
-    MAGENTA_LIGHT = "\033[38;5;201m"
-    HOT_PINK = "\033[38;5;205m"
-    ROSE = "\033[38;5;211m"
+
+class RobloxState(Enum):
+    """Estados possíveis do Roblox"""
+    CLOSED = "Fechado"
+    HOME = "Tela Inicial"
+    LOADING = "Carregando"
+    IN_GAME = "Em Jogo"
+    KEY_SCREEN = "Tela de Key"
+    UNKNOWN = "Desconhecido"
+
+
+@dataclass
+class MonitorConfig:
+    """Configuração do monitor"""
+    webhook_url: str = ""
+    server_link: str = ""
+    check_interval: int = 3
+    screenshot_on_state_change: bool = True
+    screenshot_on_key_screen: bool = True
+    enable_notifications: bool = True
     
-    # Extras
-    WHITE = "\033[97m"
-    GRAY = "\033[90m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    CYAN = "\033[96m"
+    # Thresholds para detecção de estado
+    cpu_in_game_min: float = 15.0
+    cpu_loading_min: float = 5.0
+    cpu_idle_max: float = 3.0
+    ram_in_game_min: int = 400  # MB
+    ram_home_typical: int = 200  # MB
+
+
+@dataclass
+class ProcessMetrics:
+    """Métricas de um processo"""
+    pid: str
+    cpu_percent: float
+    ram_mb: int
+    threads: int
+    timestamp: datetime
+
+
+class ConfigManager:
+    """Gerenciador de configurações"""
     
-    # Estilos
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RESET = "\033[0m"
+    def __init__(self, config_file: str = "monitor_config.json"):
+        self.config_file = Path(config_file)
+        self.config = self.load()
     
-    # Backgrounds
-    BG_RED = "\033[48;5;196m"
-    BG_PINK = "\033[48;5;198m"
-    BG_MAGENTA = "\033[48;5;200m"
-
-C = Colors()
-
-# ═══════════════════════════════════════════════════════════════════
-# CONFIGURAÇÕES
-# ═══════════════════════════════════════════════════════════════════
-CONFIG_FILE = "config_retro.json"
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
+    def load(self) -> MonitorConfig:
+        """Carrega configuração do arquivo"""
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return MonitorConfig(**data)
+            except Exception as e:
+                logging.error(f"Erro ao carregar config: {e}")
+        return MonitorConfig()
+    
+    def save(self, config: MonitorConfig) -> bool:
+        """Salva configuração no arquivo"""
         try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except: pass
-    return {"webhook_url": "", "server_link": ""}
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(asdict(config), f, indent=4, ensure_ascii=False)
+            return True
+        except Exception as e:
+            logging.error(f"Erro ao salvar config: {e}")
+            return False
 
-def save_config(cfg):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=4)
-
-CONFIG = load_config()
 
 # ═══════════════════════════════════════════════════════════════════
-# CONSTANTES DE MONITORAMENTO
+# UTILITÁRIOS ADB
 # ═══════════════════════════════════════════════════════════════════
-# Quando está jogando: CPU alta, RAM estável
-# Quando está na tela de key: CPU baixa, RAM baixa/estável
-CPU_PLAYING = 20.0          # CPU acima disso = jogando
-CPU_KEY_SCREEN = 5.0        # CPU abaixo disso = possível tela de key
-RAM_PLAYING = 500           # RAM em MB quando jogando (aproximado)
-RAM_KEY_SCREEN = 200        # RAM em MB na tela de key (aproximado)
 
-CHECK_INTERVAL = 3          # Segundos entre verificações
-KEY_DETECT_COUNT = 3        # Quantas verificações com CPU baixa para considerar tela de key
-
-# ═══════════════════════════════════════════════════════════════════
-# FUNÇÕES ADB
-# ═══════════════════════════════════════════════════════════════════
-def adb(cmd, timeout=5):
-    """Executa comando ADB"""
-    try:
-        return subprocess.check_output(
-            f"adb shell {cmd}", 
-            shell=True, 
-            stderr=subprocess.DEVNULL, 
-            timeout=timeout
-        ).decode().strip()
-    except: 
+class ADBManager:
+    """Gerenciador de comandos ADB"""
+    
+    @staticmethod
+    def execute(command: str, timeout: int = 5) -> str:
+        """Executa comando ADB e retorna output"""
+        try:
+            result = subprocess.run(
+                f"adb shell {command}",
+                shell=True,
+                capture_output=True,
+                timeout=timeout,
+                text=True
+            )
+            return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            logging.warning(f"Timeout ao executar: {command}")
+            return ""
+        except Exception as e:
+            logging.error(f"Erro no ADB: {e}")
+            return ""
+    
+    @staticmethod
+    def check_connection() -> bool:
+        """Verifica se há dispositivo conectado"""
+        try:
+            result = subprocess.run(
+                "adb devices",
+                shell=True,
+                capture_output=True,
+                timeout=3,
+                text=True
+            )
+            lines = result.stdout.strip().split('\n')
+            return len(lines) > 1 and 'device' in lines[1]
+        except:
+            return False
+    
+    @staticmethod
+    def get_roblox_packages() -> List[str]:
+        """Retorna lista de pacotes Roblox instalados"""
+        output = ADBManager.execute("pm list packages")
+        packages = []
+        for line in output.split('\n'):
+            if 'roblox' in line.lower():
+                pkg = line.replace('package:', '').strip()
+                if pkg:
+                    packages.append(pkg)
+        return packages
+    
+    @staticmethod
+    def get_pid(package: str) -> str:
+        """Retorna PID do pacote"""
+        return ADBManager.execute(f"pidof {package}")
+    
+    @staticmethod
+    def get_process_metrics(pid: str) -> Optional[ProcessMetrics]:
+        """Obtém métricas detalhadas do processo"""
+        if not pid:
+            return None
+        
+        try:
+            # CPU via top
+            top_output = ADBManager.execute(f"top -n 1 -p {pid} | grep {pid}")
+            cpu = 0.0
+            threads = 0
+            
+            if top_output:
+                parts = top_output.split()
+                for part in parts:
+                    if '%' in part:
+                        try:
+                            cpu = float(part.replace('%', '').replace(',', '.'))
+                        except:
+                            pass
+            
+            # RAM via dumpsys
+            mem_output = ADBManager.execute(f"dumpsys meminfo {pid} | grep 'TOTAL'")
+            ram = 0
+            
+            match = re.search(r'TOTAL\s+(\d+)', mem_output)
+            if match:
+                ram = int(match.group(1)) // 1024  # KB para MB
+            
+            # Threads via status
+            status = ADBManager.execute(f"cat /proc/{pid}/status | grep Threads")
+            match = re.search(r'Threads:\s+(\d+)', status)
+            if match:
+                threads = int(match.group(1))
+            
+            return ProcessMetrics(
+                pid=pid,
+                cpu_percent=cpu,
+                ram_mb=ram,
+                threads=threads,
+                timestamp=datetime.now()
+            )
+        
+        except Exception as e:
+            logging.error(f"Erro ao obter métricas: {e}")
+            return None
+    
+    @staticmethod
+    def capture_screenshot(output_path: str = "/tmp/roblox_screenshot.png") -> bool:
+        """Captura screenshot do dispositivo"""
+        try:
+            # Captura no dispositivo
+            ADBManager.execute("screencap -p /sdcard/temp_screen.png")
+            time.sleep(0.3)
+            
+            # Pull para o computador
+            result = subprocess.run(
+                f"adb pull /sdcard/temp_screen.png {output_path}",
+                shell=True,
+                capture_output=True,
+                timeout=10
+            )
+            
+            # Limpa arquivo temporário
+            ADBManager.execute("rm /sdcard/temp_screen.png")
+            
+            return result.returncode == 0 and Path(output_path).exists()
+        
+        except Exception as e:
+            logging.error(f"Erro ao capturar screenshot: {e}")
+            return False
+    
+    @staticmethod
+    def get_current_activity(package: str) -> str:
+        """Retorna a activity atual do pacote"""
+        output = ADBManager.execute(f"dumpsys window | grep mCurrentFocus")
+        if package in output:
+            match = re.search(r'([^/]+)/([\w\.]+)}', output)
+            if match:
+                return match.group(2)
         return ""
 
-def get_packages():
-    """Obtém pacotes Roblox instalados"""
-    out = adb("pm list packages roblox")
-    return [l.replace("package:", "").strip() for l in out.splitlines() if "roblox" in l.lower()]
 
-def get_pid(pkg):
-    """Obtém PID de um pacote"""
-    return adb(f"pidof {pkg}")
+# ═══════════════════════════════════════════════════════════════════
+# DETECTOR DE ESTADO
+# ═══════════════════════════════════════════════════════════════════
 
-def get_cpu(pid):
-    """Obtém uso de CPU"""
-    if not pid: 
-        return 0.0
-    top = adb(f"top -n 1 -p {pid} | grep {pid}")
-    if top:
-        for p in top.split():
-            if "%" in p:
-                try: 
-                    return float(p.replace("%", "").replace(",", "."))
-                except: 
-                    pass
-    return 0.0
-
-def get_ram(pid):
-    """Obtém uso de RAM em MB"""
-    if not pid:
-        return 0
-    try:
-        out = adb(f"dumpsys meminfo {pid} | grep 'TOTAL'")
-        match = re.search(r'TOTAL\s+(\d+)', out)
-        if match:
-            return int(match.group(1)) // 1024  # KB para MB
-    except:
-        pass
-    return 0
-
-def take_screenshot():
-    """Captura screenshot e retorna como bytes"""
-    try:
-        # Captura screenshot
-        adb("screencap -p /sdcard/screen.png")
-        time.sleep(0.5)
-        
-        # Puxa o arquivo
-        subprocess.run("adb pull /sdcard/screen.png /tmp/screen.png", 
-                      shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        
-        # Lê o arquivo
-        with open("/tmp/screen.png", "rb") as f:
-            return f.read()
-    except:
-        return None
-
-def send_webhook_with_screenshot(webhook_url, message, screenshot_bytes=None):
-    """Envia mensagem para webhook com screenshot"""
-    if not webhook_url:
-        return False
+class StateDetector:
+    """Detector inteligente de estado do Roblox"""
     
-    try:
-        # Prepara o payload
-        payload = {
-            "content": message,
-            "username": "RE_PHONE RETRO 🌸",
+    def __init__(self, config: MonitorConfig):
+        self.config = config
+    
+    def detect_state(
+        self, 
+        metrics: Optional[ProcessMetrics],
+        activity: str,
+        package: str
+    ) -> RobloxState:
+        """
+        Detecta o estado atual do Roblox baseado em múltiplos fatores
+        
+        Lógica de detecção:
+        - CLOSED: Sem PID ou métricas
+        - IN_GAME: CPU alta (>15%) + RAM alta (>400MB)
+        - LOADING: CPU média (5-15%) + mudança de activity
+        - KEY_SCREEN: CPU muito baixa (<3%) + RAM baixa + activity específica
+        - HOME: CPU baixa (<5%) + RAM média (~200MB)
+        """
+        
+        if not metrics:
+            return RobloxState.CLOSED
+        
+        cpu = metrics.cpu_percent
+        ram = metrics.ram_mb
+        
+        # Detecção via activity name (mais confiável)
+        if activity:
+            activity_lower = activity.lower()
+            
+            if 'game' in activity_lower or 'play' in activity_lower:
+                return RobloxState.IN_GAME
+            elif 'key' in activity_lower or 'auth' in activity_lower:
+                return RobloxState.KEY_SCREEN
+            elif 'home' in activity_lower or 'main' in activity_lower:
+                return RobloxState.HOME
+            elif 'loading' in activity_lower or 'splash' in activity_lower:
+                return RobloxState.LOADING
+        
+        # Detecção via métricas (fallback)
+        if cpu >= self.config.cpu_in_game_min and ram >= self.config.ram_in_game_min:
+            return RobloxState.IN_GAME
+        
+        elif cpu >= self.config.cpu_loading_min:
+            return RobloxState.LOADING
+        
+        elif cpu <= self.config.cpu_idle_max and ram < self.config.ram_home_typical:
+            # CPU muito baixa pode ser tela de key ou home parada
+            if ram < 150:  # RAM muito baixa sugere tela de key
+                return RobloxState.KEY_SCREEN
+            return RobloxState.HOME
+        
+        elif ram >= self.config.ram_home_typical and ram < self.config.ram_in_game_min:
+            return RobloxState.HOME
+        
+        return RobloxState.UNKNOWN
+
+
+# ═══════════════════════════════════════════════════════════════════
+# NOTIFICADOR DISCORD
+# ═══════════════════════════════════════════════════════════════════
+
+class DiscordNotifier:
+    """Gerenciador de notificações Discord"""
+    
+    def __init__(self, webhook_url: str):
+        self.webhook_url = webhook_url
+    
+    def send_message(
+        self,
+        content: str,
+        embed: Optional[Dict] = None,
+        screenshot_path: Optional[str] = None
+    ) -> bool:
+        """Envia mensagem para Discord"""
+        
+        if not self.webhook_url:
+            logging.warning("Webhook não configurado")
+            return False
+        
+        try:
+            payload = {"content": content}
+            
+            if embed:
+                payload["embeds"] = [embed]
+            
+            files = None
+            if screenshot_path and Path(screenshot_path).exists():
+                with open(screenshot_path, 'rb') as f:
+                    files = {"file": (Path(screenshot_path).name, f.read(), "image/png")}
+            
+            if files:
+                response = requests.post(
+                    self.webhook_url,
+                    data={"payload_json": json.dumps(payload)},
+                    files=files,
+                    timeout=10
+                )
+            else:
+                response = requests.post(
+                    self.webhook_url,
+                    json=payload,
+                    timeout=10
+                )
+            
+            return response.status_code in [200, 204]
+        
+        except Exception as e:
+            logging.error(f"Erro ao enviar webhook: {e}")
+            return False
+    
+    def create_embed(
+        self,
+        title: str,
+        description: str,
+        color: int = 0x5865F2,
+        fields: Optional[List[Dict]] = None
+    ) -> Dict:
+        """Cria embed formatado"""
+        
+        embed = {
+            "title": title,
+            "description": description,
+            "color": color,
+            "timestamp": datetime.utcnow().isoformat(),
+            "footer": {"text": "Roblox Monitor Professional"}
         }
         
-        files = None
-        if screenshot_bytes:
-            files = {
-                "file": ("screenshot.png", BytesIO(screenshot_bytes), "image/png")
-            }
+        if fields:
+            embed["fields"] = fields
         
-        # Envia
-        if files:
-            response = requests.post(webhook_url, data={"content": message}, files=files, timeout=10)
-        else:
-            response = requests.post(webhook_url, json=payload, timeout=10)
-        
-        return response.status_code in [200, 204]
-    except Exception as e:
-        return False
+        return embed
+
 
 # ═══════════════════════════════════════════════════════════════════
-# ARTE ASCII RETRO
+# INSTÂNCIA DE MONITORAMENTO
 # ═══════════════════════════════════════════════════════════════════
-def print_banner():
-    """Imprime banner com gradiente vermelho → rosa"""
-    banner = f"""
-{C.RED}██████╗ {C.RED_LIGHT}███████╗{C.PINK}      ██████╗ {C.PINK_LIGHT}██╗  ██╗{C.MAGENTA} ██████╗ {C.MAGENTA_LIGHT}███╗   ██╗{C.HOT_PINK}███████╗
-{C.RED}██╔══██╗{C.RED_LIGHT}██╔════╝{C.PINK}      ██╔══██╗{C.PINK_LIGHT}██║  ██║{C.MAGENTA}██╔═══██╗{C.MAGENTA_LIGHT}████╗  ██║{C.HOT_PINK}██╔════╝
-{C.RED}██████╔╝{C.RED_LIGHT}█████╗  {C.PINK}█████╗██████╔╝{C.PINK_LIGHT}███████║{C.MAGENTA}██║   ██║{C.MAGENTA_LIGHT}██╔██╗ ██║{C.HOT_PINK}█████╗  
-{C.RED}██╔══██╗{C.RED_LIGHT}██╔══╝  {C.PINK}╚════╝██╔═══╝ {C.PINK_LIGHT}██╔══██║{C.MAGENTA}██║   ██║{C.MAGENTA_LIGHT}██║╚██╗██║{C.HOT_PINK}██╔══╝  
-{C.RED}██║  ██║{C.RED_LIGHT}███████╗{C.PINK}      ██║     {C.PINK_LIGHT}██║  ██║{C.MAGENTA}╚██████╔╝{C.MAGENTA_LIGHT}██║ ╚████║{C.HOT_PINK}███████╗
-{C.RED}╚═╝  ╚═╝{C.RED_LIGHT}╚══════╝{C.PINK}      ╚═╝     {C.PINK_LIGHT}╚═╝  ╚═╝{C.MAGENTA} ╚═════╝ {C.MAGENTA_LIGHT}╚═╝  ╚═══╝{C.HOT_PINK}╚══════╝{C.RESET}
-{C.ROSE}                    ✧ RETRO EDITION ✧{C.RESET}
-{C.GRAY}              Synthwave Monitor for VSPhone{C.RESET}
-"""
-    print(banner)
 
-def print_gradient_line(char="═", length=60):
-    """Imprime linha com gradiente"""
-    colors = [C.RED, C.RED_LIGHT, C.PINK, C.PINK_LIGHT, C.MAGENTA, C.MAGENTA_LIGHT, C.HOT_PINK, C.ROSE]
-    segment = length // len(colors)
-    line = ""
-    for i, color in enumerate(colors):
-        line += f"{color}{char * segment}"
-    print(line + C.RESET)
-
-def print_box(title, content, width=60):
-    """Imprime caixa estilizada"""
-    print(f"\n{C.RED}╔{'═' * (width-2)}╗{C.RESET}")
-    print(f"{C.RED_LIGHT}║{C.RESET} {C.BOLD}{C.PINK}{title.center(width-4)}{C.RESET} {C.RED_LIGHT}║{C.RESET}")
-    print(f"{C.PINK}╠{'═' * (width-2)}╣{C.RESET}")
-    for line in content.split('\n'):
-        print(f"{C.PINK_LIGHT}║{C.RESET} {line.ljust(width-4)} {C.PINK_LIGHT}║{C.RESET}")
-    print(f"{C.MAGENTA}╚{'═' * (width-2)}╝{C.RESET}")
-
-# ═══════════════════════════════════════════════════════════════════
-# CLASSE DE INSTÂNCIA
-# ═══════════════════════════════════════════════════════════════════
-class Instance:
-    def __init__(self, pkg):
-        self.pkg = pkg
-        self.name = pkg.split('.')[-1].upper()
-        self.pid = ""
-        self.cpu = 0.0
-        self.ram = 0
-        self.status = "INIT"
-        self.low_cpu_count = 0  # Contador de CPU baixa consecutiva
-        self.key_detected = False
-        self.last_key_time = 0
+class RobloxInstance:
+    """Representa uma instância do Roblox sendo monitorada"""
     
-    def update_metrics(self):
-        """Atualiza métricas de CPU e RAM"""
-        self.pid = get_pid(self.pkg)
+    def __init__(self, package: str, config: MonitorConfig, notifier: DiscordNotifier):
+        self.package = package
+        self.name = self._extract_name(package)
+        self.config = config
+        self.notifier = notifier
+        self.detector = StateDetector(config)
         
-        if not self.pid:
-            self.status = "DEAD"
-            self.cpu = 0.0
-            self.ram = 0
+        # Estado
+        self.current_state = RobloxState.UNKNOWN
+        self.previous_state = RobloxState.UNKNOWN
+        self.last_metrics: Optional[ProcessMetrics] = None
+        self.state_change_count = 0
+        self.last_notification_time = datetime.now()
+        
+        # Thread control
+        self.running = False
+        self.thread: Optional[threading.Thread] = None
+    
+    def _extract_name(self, package: str) -> str:
+        """Extrai nome amigável do pacote"""
+        parts = package.split('.')
+        return parts[-1].upper() if parts else package.upper()
+    
+    def update(self) -> None:
+        """Atualiza métricas e estado da instância"""
+        try:
+            # Obtém PID
+            pid = ADBManager.get_pid(self.package)
+            
+            if not pid:
+                self._handle_state_change(RobloxState.CLOSED)
+                self.last_metrics = None
+                return
+            
+            # Obtém métricas
+            metrics = ADBManager.get_process_metrics(pid)
+            self.last_metrics = metrics
+            
+            if not metrics:
+                self._handle_state_change(RobloxState.UNKNOWN)
+                return
+            
+            # Obtém activity atual
+            activity = ADBManager.get_current_activity(self.package)
+            
+            # Detecta estado
+            new_state = self.detector.detect_state(metrics, activity, self.package)
+            
+            # Verifica mudança de estado
+            if new_state != self.current_state:
+                self._handle_state_change(new_state)
+        
+        except Exception as e:
+            logging.error(f"Erro ao atualizar {self.name}: {e}")
+    
+    def _handle_state_change(self, new_state: RobloxState) -> None:
+        """Processa mudança de estado"""
+        self.previous_state = self.current_state
+        self.current_state = new_state
+        self.state_change_count += 1
+        
+        # Log
+        logging.info(f"{self.name}: {self.previous_state.value} → {new_state.value}")
+        
+        # Notificação
+        if self.config.enable_notifications:
+            self._send_state_notification(new_state)
+    
+    def _send_state_notification(self, state: RobloxState) -> None:
+        """Envia notificação de mudança de estado"""
+        
+        # Evita spam (mínimo 10s entre notificações)
+        time_since_last = (datetime.now() - self.last_notification_time).total_seconds()
+        if time_since_last < 10:
             return
         
-        self.cpu = get_cpu(self.pid)
-        self.ram = get_ram(self.pid)
+        # Captura screenshot se configurado
+        screenshot_path = None
         
-        # Detecta estado baseado em CPU/RAM
-        if self.cpu >= CPU_PLAYING:
-            self.status = "PLAYING"
-            self.low_cpu_count = 0
-            self.key_detected = False
-        elif self.cpu <= CPU_KEY_SCREEN:
-            self.low_cpu_count += 1
-            if self.low_cpu_count >= KEY_DETECT_COUNT:
-                self.status = "KEY?"
-                if not self.key_detected:
-                    self.key_detected = True
-                    self.last_key_time = time.time()
-            else:
-                self.status = "LOW"
-        else:
-            self.status = "IDLE"
-            self.low_cpu_count = max(0, self.low_cpu_count - 1)
+        should_screenshot = (
+            (self.config.screenshot_on_state_change) or
+            (state == RobloxState.KEY_SCREEN and self.config.screenshot_on_key_screen)
+        )
+        
+        if should_screenshot:
+            screenshot_path = f"/tmp/screenshot_{self.name}_{int(time.time())}.png"
+            ADBManager.capture_screenshot(screenshot_path)
+        
+        # Prepara embed
+        color_map = {
+            RobloxState.IN_GAME: 0x57F287,      # Verde
+            RobloxState.HOME: 0x5865F2,         # Azul
+            RobloxState.LOADING: 0xFEE75C,      # Amarelo
+            RobloxState.KEY_SCREEN: 0xED4245,   # Vermelho
+            RobloxState.CLOSED: 0x99AAB5,       # Cinza
+            RobloxState.UNKNOWN: 0x5865F2       # Azul
+        }
+        
+        icon_map = {
+            RobloxState.IN_GAME: "🎮",
+            RobloxState.HOME: "🏠",
+            RobloxState.LOADING: "⏳",
+            RobloxState.KEY_SCREEN: "🔑",
+            RobloxState.CLOSED: "❌",
+            RobloxState.UNKNOWN: "❓"
+        }
+        
+        fields = []
+        
+        if self.last_metrics:
+            fields.extend([
+                {
+                    "name": "CPU",
+                    "value": f"{self.last_metrics.cpu_percent:.1f}%",
+                    "inline": True
+                },
+                {
+                    "name": "RAM",
+                    "value": f"{self.last_metrics.ram_mb} MB",
+                    "inline": True
+                },
+                {
+                    "name": "Threads",
+                    "value": str(self.last_metrics.threads),
+                    "inline": True
+                }
+            ])
+        
+        embed = self.notifier.create_embed(
+            title=f"{icon_map[state]} {self.name}",
+            description=f"**Estado:** {state.value}\n**Anterior:** {self.previous_state.value}",
+            color=color_map[state],
+            fields=fields
+        )
+        
+        # Envia
+        success = self.notifier.send_message(
+            content=f"**Mudança de estado detectada**",
+            embed=embed,
+            screenshot_path=screenshot_path
+        )
+        
+        if success:
+            self.last_notification_time = datetime.now()
+        
+        # Limpa screenshot
+        if screenshot_path and Path(screenshot_path).exists():
+            try:
+                os.remove(screenshot_path)
+            except:
+                pass
+    
+    def start_monitoring(self) -> None:
+        """Inicia monitoramento em thread separada"""
+        if self.running:
+            return
+        
+        self.running = True
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+        logging.info(f"Monitoramento iniciado: {self.name}")
+    
+    def stop_monitoring(self) -> None:
+        """Para o monitoramento"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2)
+        logging.info(f"Monitoramento parado: {self.name}")
+    
+    def _monitor_loop(self) -> None:
+        """Loop principal de monitoramento"""
+        while self.running:
+            try:
+                self.update()
+                time.sleep(self.config.check_interval)
+            except Exception as e:
+                logging.error(f"Erro no loop de {self.name}: {e}")
+                time.sleep(5)
+
 
 # ═══════════════════════════════════════════════════════════════════
 # MONITOR PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════
-class RetroMonitor:
-    def __init__(self):
-        self.instances = {}
-        self.running = False
-        self.logs = []
+
+class RobloxMonitor:
+    """Monitor principal que gerencia todas as instâncias"""
     
-    def log(self, msg):
-        """Adiciona log com timestamp"""
-        t = datetime.datetime.now().strftime("%H:%M:%S")
-        self.logs.append(f"[{t}] {msg}")
-        if len(self.logs) > 8:
-            self.logs.pop(0)
+    def __init__(self):
+        self.config_manager = ConfigManager()
+        self.config = self.config_manager.config
+        self.notifier = DiscordNotifier(self.config.webhook_url)
+        self.instances: Dict[str, RobloxInstance] = {}
+        self.running = False
+        
+        # Setup logging
+        self._setup_logging()
+    
+    def _setup_logging(self) -> None:
+        """Configura sistema de logging"""
+        log_format = '%(asctime)s | %(levelname)-8s | %(message)s'
+        date_format = '%Y-%m-%d %H:%M:%S'
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format=log_format,
+            datefmt=date_format,
+            handlers=[
+                logging.FileHandler('roblox_monitor.log', encoding='utf-8'),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+    
+    def start(self) -> bool:
+        """Inicia o monitor"""
+        
+        # Verifica conexão ADB
+        if not ADBManager.check_connection():
+            logging.error("❌ Nenhum dispositivo ADB conectado!")
+            return False
+        
+        # Busca pacotes Roblox
+        packages = ADBManager.get_roblox_packages()
+        
+        if not packages:
+            logging.error("❌ Nenhum pacote Roblox encontrado!")
+            return False
+        
+        logging.info(f"✅ Encontrados {len(packages)} pacote(s) Roblox")
+        
+        # Cria instâncias
+        for package in packages:
+            instance = RobloxInstance(package, self.config, self.notifier)
+            self.instances[package] = instance
+            instance.start_monitoring()
+        
+        self.running = True
+        
+        # Notificação de início
+        if self.config.enable_notifications:
+            embed = self.notifier.create_embed(
+                title="🚀 Monitor Iniciado",
+                description=f"Monitorando {len(packages)} instância(s) do Roblox",
+                color=0x57F287
+            )
+            self.notifier.send_message("", embed=embed)
+        
+        logging.info("✅ Monitor iniciado com sucesso!")
+        return True
+    
+    def stop(self) -> None:
+        """Para o monitor"""
+        logging.info("Parando monitor...")
+        
+        for instance in self.instances.values():
+            instance.stop_monitoring()
+        
+        self.running = False
+        
+        # Notificação de parada
+        if self.config.enable_notifications:
+            embed = self.notifier.create_embed(
+                title="⏹️ Monitor Parado",
+                description="Sistema de monitoramento encerrado",
+                color=0x99AAB5
+            )
+            self.notifier.send_message("", embed=embed)
+        
+        logging.info("✅ Monitor parado")
+    
+    def get_status(self) -> Dict:
+        """Retorna status atual de todas as instâncias"""
+        status = {}
+        
+        for package, instance in self.instances.items():
+            status[instance.name] = {
+                "state": instance.current_state.value,
+                "cpu": instance.last_metrics.cpu_percent if instance.last_metrics else 0,
+                "ram": instance.last_metrics.ram_mb if instance.last_metrics else 0,
+                "state_changes": instance.state_change_count
+            }
+        
+        return status
+    
+    def display_status(self) -> None:
+        """Exibe status formatado no console"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+        
+        print("╔════════════════════════════════════════════════════════════╗")
+        print("║         ROBLOX MONITOR - PROFESSIONAL EDITION             ║")
+        print("╚════════════════════════════════════════════════════════════╝")
+        print()
+        
+        if not self.instances:
+            print("  ⚠️  Nenhuma instância sendo monitorada")
+            return
+        
+        print("  INSTÂNCIAS ATIVAS:")
+        print("  " + "─" * 56)
+        
+        for instance in self.instances.values():
+            state_icon = {
+                RobloxState.IN_GAME: "🎮",
+                RobloxState.HOME: "🏠",
+                RobloxState.LOADING: "⏳",
+                RobloxState.KEY_SCREEN: "🔑",
+                RobloxState.CLOSED: "❌",
+                RobloxState.UNKNOWN: "❓"
+            }.get(instance.current_state, "❓")
+            
+            metrics_str = "N/A"
+            if instance.last_metrics:
+                metrics_str = f"CPU: {instance.last_metrics.cpu_percent:5.1f}% | RAM: {instance.last_metrics.ram_mb:4d} MB"
+            
+            print(f"  {state_icon} {instance.name:12} | {instance.current_state.value:15} | {metrics_str}")
+        
+        print("  " + "─" * 56)
+        print()
+        print("  Pressione Ctrl+C para parar o monitor")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# INTERFACE DE LINHA DE COMANDO
+# ═══════════════════════════════════════════════════════════════════
+
+class CLI:
+    """Interface de linha de comando"""
+    
+    def __init__(self):
+        self.config_manager = ConfigManager()
+        self.monitor = RobloxMonitor()
     
     def clear_screen(self):
         """Limpa a tela"""
         os.system('clear' if os.name == 'posix' else 'cls')
     
-    def render_hud(self):
-        """Renderiza o HUD retro"""
+    def print_header(self):
+        """Imprime cabeçalho"""
         self.clear_screen()
-        print_banner()
-        print_gradient_line()
-        
-        # Status das instâncias
-        print(f"\n{C.BOLD}{C.PINK}  ◈ INSTÂNCIAS{C.RESET}")
-        print(f"{C.GRAY}  {'─' * 56}{C.RESET}")
-        
-        for pkg, inst in self.instances.items():
-            # Ícone de status
-            if inst.status == "PLAYING":
-                icon = f"{C.GREEN}▶{C.RESET}"
-                status_color = C.GREEN
-            elif inst.status == "KEY?":
-                icon = f"{C.YELLOW}🔑{C.RESET}"
-                status_color = C.YELLOW
-            elif inst.status == "DEAD":
-                icon = f"{C.RED}✖{C.RESET}"
-                status_color = C.RED
-            elif inst.status == "LOW":
-                icon = f"{C.YELLOW}◐{C.RESET}"
-                status_color = C.YELLOW
+        print("╔════════════════════════════════════════════════════════════╗")
+        print("║         ROBLOX MONITOR - PROFESSIONAL EDITION             ║")
+        print("║                    Versão 2.0.0                           ║")
+        print("╚════════════════════════════════════════════════════════════╝")
+        print()
+    
+    def main_menu(self):
+        """Menu principal"""
+        while True:
+            self.print_header()
+            
+            # Status da configuração
+            config = self.config_manager.config
+            webhook_status = "✅" if config.webhook_url else "❌"
+            server_status = "✅" if config.server_link else "❌"
+            
+            print(f"  Webhook: {webhook_status}  |  Server Link: {server_status}")
+            print()
+            print("  ┌────────────────────────────────────────────────────┐")
+            print("  │  [1] 🚀 Iniciar Monitor                            │")
+            print("  │  [2] ⚙️  Configurações                              │")
+            print("  │  [3] 🧪 Testar Captura de Screenshot               │")
+            print("  │  [4] 📊 Ver Logs                                    │")
+            print("  │  [0] ❌ Sair                                        │")
+            print("  └────────────────────────────────────────────────────┘")
+            print()
+            
+            choice = input("  Selecione uma opção: ").strip()
+            
+            if choice == "1":
+                self.start_monitor()
+            elif choice == "2":
+                self.configure()
+            elif choice == "3":
+                self.test_screenshot()
+            elif choice == "4":
+                self.view_logs()
+            elif choice == "0":
+                print("\n  👋 Até logo!\n")
+                break
             else:
-                icon = f"{C.GRAY}◌{C.RESET}"
-                status_color = C.GRAY
-            
-            # CPU com cor gradiente
-            if inst.cpu >= CPU_PLAYING:
-                cpu_color = C.GREEN
-            elif inst.cpu >= CPU_KEY_SCREEN:
-                cpu_color = C.YELLOW
-            else:
-                cpu_color = C.RED
-            
-            # RAM
-            ram_str = f"{inst.ram}MB" if inst.ram > 0 else "N/A"
-            
-            print(f"  {icon} {C.BOLD}{C.ROSE}{inst.name:12}{C.RESET} "
-                  f"{C.GRAY}│{C.RESET} CPU: {cpu_color}{inst.cpu:5.1f}%{C.RESET} "
-                  f"{C.GRAY}│{C.RESET} RAM: {C.CYAN}{ram_str:8}{C.RESET} "
-                  f"{C.GRAY}│{C.RESET} {status_color}{inst.status:8}{C.RESET}")
-        
-        print(f"{C.GRAY}  {'─' * 56}{C.RESET}")
-        
-        # Legenda
-        print(f"\n{C.DIM}  {C.GREEN}▶ Jogando{C.RESET}  {C.DIM}{C.YELLOW}🔑 Tela de Key{C.RESET}  {C.DIM}{C.RED}✖ Morto{C.RESET}")
-        
-        # Logs
-        print(f"\n{C.BOLD}{C.MAGENTA}  ◈ LOGS{C.RESET}")
-        print(f"{C.GRAY}  {'─' * 56}{C.RESET}")
-        for log in self.logs[-6:]:
-            print(f"  {C.DIM}{log}{C.RESET}")
-        
-        # Rodapé
-        print(f"\n{C.GRAY}  {'─' * 56}{C.RESET}")
-        print(f"  {C.DIM}Pressione Ctrl+C para sair{C.RESET}")
+                print("\n  ⚠️  Opção inválida!")
+                time.sleep(1)
     
-    def check_for_key_screen(self, inst):
-        """Verifica se instância está na tela de key e envia webhook"""
-        if inst.key_detected and (time.time() - inst.last_key_time) < 5:
-            self.log(f"🔑 {inst.name}: Possível tela de KEY detectada!")
-            
-            webhook = CONFIG.get("webhook_url", "")
-            if webhook:
-                self.log(f"📸 Capturando screenshot...")
-                screenshot = take_screenshot()
-                
-                message = f"🔑 **{inst.name}** - Possível tela de KEY detectada!\n" \
-                         f"CPU: {inst.cpu:.1f}% | RAM: {inst.ram}MB"
-                
-                if send_webhook_with_screenshot(webhook, message, screenshot):
-                    self.log(f"✅ Screenshot enviado para webhook!")
-                else:
-                    self.log(f"❌ Falha ao enviar webhook")
-            
-            # Reseta para não enviar múltiplas vezes
-            inst.last_key_time = 0
-    
-    def monitor_worker(self, inst):
-        """Worker de monitoramento para uma instância"""
-        while self.running:
-            inst.update_metrics()
-            self.check_for_key_screen(inst)
-            time.sleep(CHECK_INTERVAL)
-    
-    def start(self):
+    def start_monitor(self):
         """Inicia o monitor"""
-        webhook = CONFIG.get("webhook_url", "")
-        server = CONFIG.get("server_link", "")
+        self.print_header()
+        print("  🚀 Iniciando monitor...\n")
         
-        if not webhook:
-            print(f"\n{C.RED}⚠ Configure o Webhook primeiro!{C.RESET}")
-            time.sleep(2)
+        if not self.monitor.config.webhook_url:
+            print("  ⚠️  Configure o webhook primeiro!")
+            input("\n  Pressione Enter para continuar...")
             return
         
-        self.running = True
-        pkgs = get_packages()
-        
-        if not pkgs:
-            print(f"\n{C.RED}⚠ Nenhum pacote Roblox encontrado!{C.RESET}")
-            time.sleep(2)
-            return
-        
-        self.log(f"Iniciando monitor com {len(pkgs)} instâncias")
-        
-        # Cria instâncias
-        for pkg in pkgs:
-            inst = Instance(pkg)
-            self.instances[pkg] = inst
-            threading.Thread(target=self.monitor_worker, args=(inst,), daemon=True).start()
-            self.log(f"+ {inst.name} monitorando")
-        
-        # Envia webhook de início
-        send_webhook_with_screenshot(webhook, f"🚀 **RE_PHONE RETRO** iniciado!\nMonitorando {len(pkgs)} instâncias")
-        
-        # Loop de renderização
-        try:
-            while self.running:
-                self.render_hud()
+        if self.monitor.start():
+            try:
+                while self.monitor.running:
+                    self.monitor.display_status()
+                    time.sleep(2)
+            except KeyboardInterrupt:
+                print("\n\n  ⏹️  Parando monitor...")
+                self.monitor.stop()
                 time.sleep(1)
-        except KeyboardInterrupt:
-            self.running = False
-            print(f"\n{C.YELLOW}Monitor encerrado.{C.RESET}")
-
-monitor = RetroMonitor()
-
-# ═══════════════════════════════════════════════════════════════════
-# MENU PRINCIPAL
-# ═══════════════════════════════════════════════════════════════════
-def main_menu():
-    while True:
-        os.system('clear' if os.name == 'posix' else 'cls')
-        print_banner()
-        print_gradient_line()
-        
-        # Status atual
-        webhook_ok = "✓" if CONFIG.get("webhook_url") else "✗"
-        server_ok = "✓" if CONFIG.get("server_link") else "✗"
-        
-        webhook_color = C.GREEN if webhook_ok == "✓" else C.RED
-        server_color = C.GREEN if server_ok == "✓" else C.RED
-        
-        print(f"\n  {C.GRAY}Status:{C.RESET}")
-        print(f"  {C.PINK}Webhook:{C.RESET} {webhook_color}{webhook_ok}{C.RESET}  "
-              f"{C.PINK}Server:{C.RESET} {server_color}{server_ok}{C.RESET}")
-        
-        # Menu
-        print(f"\n{C.BOLD}{C.ROSE}  ╔══════════════════════════════════════╗{C.RESET}")
-        print(f"{C.BOLD}{C.ROSE}  ║{C.RESET}  {C.RED}[1]{C.RESET} {C.WHITE}🚀 Iniciar Monitor{C.RESET}              {C.BOLD}{C.ROSE}║{C.RESET}")
-        print(f"{C.BOLD}{C.ROSE}  ║{C.RESET}  {C.PINK}[2]{C.RESET} {C.WHITE}🔗 Configurar Webhook{C.RESET}           {C.BOLD}{C.ROSE}║{C.RESET}")
-        print(f"{C.BOLD}{C.ROSE}  ║{C.RESET}  {C.MAGENTA}[3]{C.RESET} {C.WHITE}🌐 Configurar Link do Servidor{C.RESET}  {C.BOLD}{C.ROSE}║{C.RESET}")
-        print(f"{C.BOLD}{C.ROSE}  ║{C.RESET}  {C.HOT_PINK}[4]{C.RESET} {C.WHITE}📸 Testar Screenshot + Webhook{C.RESET}  {C.BOLD}{C.ROSE}║{C.RESET}")
-        print(f"{C.BOLD}{C.ROSE}  ║{C.RESET}  {C.GRAY}[0]{C.RESET} {C.WHITE}❌ Sair{C.RESET}                         {C.BOLD}{C.ROSE}║{C.RESET}")
-        print(f"{C.BOLD}{C.ROSE}  ╚══════════════════════════════════════╝{C.RESET}")
-        
-        choice = input(f"\n  {C.PINK}Selecione:{C.RESET} ").strip()
-        
-        if choice == "1":
-            monitor.start()
-        elif choice == "2":
-            print(f"\n  {C.CYAN}Cole o URL do Webhook:{C.RESET}")
-            webhook = input(f"  {C.GRAY}>{C.RESET} ").strip()
-            if webhook:
-                CONFIG["webhook_url"] = webhook
-                save_config(CONFIG)
-                print(f"  {C.GREEN}✓ Webhook salvo!{C.RESET}")
-                time.sleep(1)
-        elif choice == "3":
-            print(f"\n  {C.CYAN}Cole o Link do Servidor (VIP):{C.RESET}")
-            server = input(f"  {C.GRAY}>{C.RESET} ").strip()
-            if server:
-                CONFIG["server_link"] = server
-                save_config(CONFIG)
-                print(f"  {C.GREEN}✓ Link salvo!{C.RESET}")
-                time.sleep(1)
-        elif choice == "4":
-            print(f"\n  {C.YELLOW}Capturando screenshot...{C.RESET}")
-            screenshot = take_screenshot()
-            webhook = CONFIG.get("webhook_url", "")
+        else:
+            print("\n  ❌ Falha ao iniciar monitor!")
+            input("\n  Pressione Enter para continuar...")
+    
+    def configure(self):
+        """Menu de configurações"""
+        while True:
+            self.print_header()
+            config = self.config_manager.config
             
-            if not webhook:
-                print(f"  {C.RED}⚠ Configure o webhook primeiro!{C.RESET}")
-            elif screenshot:
-                if send_webhook_with_screenshot(webhook, "🧪 **Teste de Screenshot**\nSe você está vendo isso, funcionou!", screenshot):
-                    print(f"  {C.GREEN}✓ Screenshot enviado com sucesso!{C.RESET}")
-                else:
-                    print(f"  {C.RED}✗ Falha ao enviar screenshot{C.RESET}")
+            print("  ⚙️  CONFIGURAÇÕES")
+            print("  " + "─" * 56)
+            print(f"  Webhook URL: {config.webhook_url[:50] if config.webhook_url else 'Não configurado'}")
+            print(f"  Server Link: {config.server_link[:50] if config.server_link else 'Não configurado'}")
+            print(f"  Intervalo de verificação: {config.check_interval}s")
+            print(f"  Screenshot em mudança de estado: {'Sim' if config.screenshot_on_state_change else 'Não'}")
+            print(f"  Screenshot em tela de key: {'Sim' if config.screenshot_on_key_screen else 'Não'}")
+            print("  " + "─" * 56)
+            print()
+            print("  [1] Configurar Webhook URL")
+            print("  [2] Configurar Server Link")
+            print("  [3] Ajustar Intervalo de Verificação")
+            print("  [4] Toggle Screenshots")
+            print("  [0] Voltar")
+            print()
+            
+            choice = input("  Selecione: ").strip()
+            
+            if choice == "1":
+                webhook = input("\n  Cole o Webhook URL: ").strip()
+                if webhook:
+                    config.webhook_url = webhook
+                    self.config_manager.save(config)
+                    self.monitor.notifier.webhook_url = webhook
+                    print("  ✅ Webhook salvo!")
+                    time.sleep(1)
+            
+            elif choice == "2":
+                server = input("\n  Cole o Server Link: ").strip()
+                if server:
+                    config.server_link = server
+                    self.config_manager.save(config)
+                    print("  ✅ Server link salvo!")
+                    time.sleep(1)
+            
+            elif choice == "3":
+                try:
+                    interval = int(input("\n  Intervalo em segundos (recomendado: 3-5): ").strip())
+                    if 1 <= interval <= 60:
+                        config.check_interval = interval
+                        self.config_manager.save(config)
+                        print("  ✅ Intervalo atualizado!")
+                    else:
+                        print("  ⚠️  Valor deve estar entre 1 e 60")
+                    time.sleep(1)
+                except:
+                    print("  ⚠️  Valor inválido!")
+                    time.sleep(1)
+            
+            elif choice == "4":
+                print("\n  [1] Toggle Screenshot em mudança de estado")
+                print("  [2] Toggle Screenshot em tela de key")
+                sub = input("\n  Selecione: ").strip()
+                
+                if sub == "1":
+                    config.screenshot_on_state_change = not config.screenshot_on_state_change
+                    self.config_manager.save(config)
+                    print(f"  ✅ Screenshot em mudança: {'Ativado' if config.screenshot_on_state_change else 'Desativado'}")
+                elif sub == "2":
+                    config.screenshot_on_key_screen = not config.screenshot_on_key_screen
+                    self.config_manager.save(config)
+                    print(f"  ✅ Screenshot em tela de key: {'Ativado' if config.screenshot_on_key_screen else 'Desativado'}")
+                time.sleep(1)
+            
+            elif choice == "0":
+                break
+    
+    def test_screenshot(self):
+        """Testa captura de screenshot"""
+        self.print_header()
+        print("  🧪 TESTE DE SCREENSHOT\n")
+        
+        if not self.monitor.config.webhook_url:
+            print("  ⚠️  Configure o webhook primeiro!")
+            input("\n  Pressione Enter para continuar...")
+            return
+        
+        print("  📸 Capturando screenshot...")
+        screenshot_path = "/tmp/test_screenshot.png"
+        
+        if ADBManager.capture_screenshot(screenshot_path):
+            print("  ✅ Screenshot capturado!")
+            print("  📤 Enviando para webhook...")
+            
+            notifier = DiscordNotifier(self.monitor.config.webhook_url)
+            embed = notifier.create_embed(
+                title="🧪 Teste de Screenshot",
+                description="Se você está vendo isso, o sistema está funcionando corretamente!",
+                color=0x5865F2
+            )
+            
+            if notifier.send_message("**Teste de Screenshot**", embed=embed, screenshot_path=screenshot_path):
+                print("  ✅ Screenshot enviado com sucesso!")
             else:
-                print(f"  {C.RED}✗ Falha ao capturar screenshot{C.RESET}")
+                print("  ❌ Falha ao enviar screenshot")
             
-            input(f"\n  {C.GRAY}Pressione Enter para continuar...{C.RESET}")
-        elif choice == "0":
-            print(f"\n  {C.ROSE}Até mais! ✧{C.RESET}\n")
-            break
+            # Limpa arquivo
+            try:
+                os.remove(screenshot_path)
+            except:
+                pass
+        else:
+            print("  ❌ Falha ao capturar screenshot")
+        
+        input("\n  Pressione Enter para continuar...")
+    
+    def view_logs(self):
+        """Visualiza logs"""
+        self.print_header()
+        print("  📊 LOGS RECENTES\n")
+        
+        log_file = Path("roblox_monitor.log")
+        
+        if not log_file.exists():
+            print("  ℹ️  Nenhum log disponível ainda")
+        else:
+            try:
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    # Mostra últimas 20 linhas
+                    for line in lines[-20:]:
+                        print(f"  {line.rstrip()}")
+            except Exception as e:
+                print(f"  ❌ Erro ao ler logs: {e}")
+        
+        input("\n  Pressione Enter para continuar...")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PONTO DE ENTRADA
+# ═══════════════════════════════════════════════════════════════════
+
+def main():
+    """Função principal"""
+    try:
+        cli = CLI()
+        cli.main_menu()
+    except KeyboardInterrupt:
+        print("\n\n  👋 Programa encerrado pelo usuário\n")
+    except Exception as e:
+        logging.error(f"Erro fatal: {e}", exc_info=True)
+        print(f"\n  ❌ Erro fatal: {e}\n")
+
 
 if __name__ == "__main__":
-    main_menu()
+    main()
