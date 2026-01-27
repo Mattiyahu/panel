@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
-SHORELINE v1
-Sistema Profissional de Monitoramento para Roblox
+SHEROLINE v1
+Sistema Autônomo de Monitoramento Roblox
 
 Autor: MSA
 """
 
 import os
+import sys
 import json
 import time
+import shutil
 import subprocess
 import threading
 import re
 from pathlib import Path
 from typing import Dict, List
 from datetime import datetime
-from dataclasses import dataclass, asdict
 from enum import Enum
+from dataclasses import dataclass
 import requests
 
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 # RICH
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 
 try:
     from rich.console import Console
@@ -31,8 +33,8 @@ try:
     from rich.live import Live
     from rich.text import Text
     from rich.align import Align
-    from rich.box import ROUNDED
     from rich.layout import Layout
+    from rich.box import ROUNDED
     from rich import print as rprint
 except ImportError:
     os.system("pip install rich")
@@ -43,62 +45,69 @@ except ImportError:
     from rich.live import Live
     from rich.text import Text
     from rich.align import Align
-    from rich.box import ROUNDED
     from rich.layout import Layout
+    from rich.box import ROUNDED
     from rich import print as rprint
 
 console = Console()
 
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
+# ARQUIVOS
+# ==========================================================
+
+BASE_DIR = Path(__file__).parent
+LINKS_FILE = BASE_DIR / "links.json"
+
+# ==========================================================
 # ESTADOS
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 
 class RobloxState(Enum):
     CLOSED = "Fechado"
     HOME = "Inicial"
     LOADING = "Carregando"
     IN_GAME = "Ativo"
-    UNKNOWN = "Indefinido"
 
-
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 # CONFIG
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 
 @dataclass
-class MonitorConfig:
-    webhook_url: str = ""
-    server_link: str = ""
+class Config:
     check_interval: int = 3
+    ram_active_min: int = 1200
     cpu_idle_max: float = 3.0
-    ram_active_min: int = 1200  # REGRA DE OURO
 
-CONFIG_FILE = "shoreline_config.json"
+CFG = Config()
 
+# ==========================================================
+# LINKS
+# ==========================================================
 
-def load_config() -> MonitorConfig:
-    if Path(CONFIG_FILE).exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return MonitorConfig(**json.load(f))
-        except:
-            pass
-    return MonitorConfig()
+def load_links():
+    if not LINKS_FILE.exists():
+        LINKS_FILE.write_text(json.dumps({
+            "server_link": "",
+            "webhook_url": ""
+        }, indent=4), encoding="utf-8")
 
+    with open(LINKS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def save_config(cfg: MonitorConfig):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(asdict(cfg), f, indent=4, ensure_ascii=False)
+def save_links(data):
+    with open(LINKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
+LINKS = load_links()
 
-# ═══════════════════════════════════════════════════════════════
-# ADB
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
+# AUTO SETUP ADB
+# ==========================================================
 
-def adb(cmd: list, timeout=5) -> str:
+def adb_cmd(cmd, timeout=5):
     try:
         r = subprocess.run(
-            ["adb", "shell"] + cmd,
+            ["adb"] + cmd,
             capture_output=True,
             timeout=timeout,
             text=True
@@ -107,32 +116,49 @@ def adb(cmd: list, timeout=5) -> str:
     except:
         return ""
 
+def adb_available():
+    return shutil.which("adb") is not None
 
-def adb_ok() -> bool:
-    try:
-        r = subprocess.run(["adb", "devices"], capture_output=True, text=True)
-        return "device" in r.stdout.splitlines()[-1]
-    except:
-        return False
+def adb_autosetup():
+    rprint("[cyan]Verificando ADB...[/cyan]")
 
+    if not adb_available():
+        rprint("[red]ADB não encontrado no sistema.[/red]")
+        rprint("[yellow]Instale Android Platform Tools e reinicie o script.[/yellow]")
+        sys.exit(1)
 
-def get_packages() -> List[str]:
-    out = adb(["pm", "list", "packages"])
-    return [
-        l.replace("package:", "")
-        for l in out.splitlines()
-        if "roblox" in l.lower()
-    ]
+    subprocess.run(["adb", "kill-server"], stdout=subprocess.DEVNULL)
+    subprocess.run(["adb", "start-server"], stdout=subprocess.DEVNULL)
 
+    rprint("[green]Servidor ADB iniciado.[/green]")
 
-def get_pid(pkg: str) -> str:
-    return adb(["pidof", pkg])
+    while True:
+        out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+        lines = out.strip().splitlines()
+        if len(lines) > 1 and "device" in lines[1]:
+            rprint("[green]Dispositivo conectado.[/green]")
+            break
+        rprint("[yellow]Aguardando dispositivo ADB...[/yellow]")
+        time.sleep(2)
 
+# ==========================================================
+# ADB UTILS
+# ==========================================================
 
-def get_cpu(pid: str) -> float:
+def adb_shell(cmd):
+    return adb_cmd(["shell"] + cmd)
+
+def get_packages():
+    out = adb_shell(["pm", "list", "packages"])
+    return [l.replace("package:", "") for l in out.splitlines() if "roblox" in l.lower()]
+
+def get_pid(pkg):
+    return adb_shell(["pidof", pkg])
+
+def get_cpu(pid):
     if not pid:
         return 0.0
-    out = adb(["top", "-n", "1", "-p", pid])
+    out = adb_shell(["top", "-n", "1", "-p", pid])
     for p in out.split():
         if "%" in p:
             try:
@@ -141,124 +167,92 @@ def get_cpu(pid: str) -> float:
                 pass
     return 0.0
 
-
-def get_ram(pid: str) -> int:
+def get_ram(pid):
     if not pid:
         return 0
-    out = adb(["dumpsys", "meminfo", pid])
+    out = adb_shell(["dumpsys", "meminfo", pid])
     m = re.search(r"TOTAL\s+(\d+)", out)
     return int(m.group(1)) // 1024 if m else 0
 
+def stop_app(pkg):
+    adb_shell(["am", "force-stop", pkg])
 
-def stop_app(pkg: str):
-    adb(["am", "force-stop", pkg])
+def start_app(pkg):
+    adb_shell(["monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"])
 
+def start_app_link(pkg, link):
+    adb_shell(["am", "start", "-a", "android.intent.action.VIEW", "-d", link])
 
-def start_app(pkg: str):
-    adb(["monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"])
+# ==========================================================
+# SCREENSHOT
+# ==========================================================
 
-
-def start_app_link(pkg: str, link: str):
-    adb([
-        "am", "start",
-        "-a", "android.intent.action.VIEW",
-        "-d", link
-    ])
-
-
-# ═══════════════════════════════════════════════════════════════
-# SCREENSHOT (SAFE)
-# ═══════════════════════════════════════════════════════════════
-
-def capture_screenshot(path: str) -> bool:
+def capture_screenshot(path):
     try:
         remote = f"/sdcard/sc_{int(time.time()*1000)}.png"
-
-        subprocess.run(
-            ["adb", "shell", "screencap", "-p", remote],
-            timeout=3,
-            check=True
-        )
-        subprocess.run(
-            ["adb", "pull", remote, path],
-            timeout=5,
-            check=True
-        )
-        subprocess.run(
-            ["adb", "shell", "rm", remote],
-            timeout=2
-        )
+        subprocess.run(["adb", "shell", "screencap", "-p", remote], timeout=3, check=True)
+        subprocess.run(["adb", "pull", remote, path], timeout=5, check=True)
+        subprocess.run(["adb", "shell", "rm", remote], timeout=2)
         return Path(path).exists()
     except:
         return False
 
-
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 # DETECTOR
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 
-def detect_state(cpu: float, ram: int, cfg: MonitorConfig) -> RobloxState:
+def detect_state(cpu, ram):
     if ram == 0:
         return RobloxState.CLOSED
-
-    if ram >= cfg.ram_active_min:
+    if ram >= CFG.ram_active_min:
         return RobloxState.IN_GAME
-
-    if cpu <= cfg.cpu_idle_max:
+    if cpu <= CFG.cpu_idle_max:
         return RobloxState.HOME
-
     return RobloxState.LOADING
 
-
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 # WEBHOOK
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 
-def send_webhook(url: str, msg: str, screenshot=False):
+def send_webhook(msg, screenshot=False):
+    url = LINKS.get("webhook_url")
     if not url:
         return
 
     files = None
-    path = None
+    img = None
 
     if screenshot:
-        path = f"/tmp/sc_{int(time.time())}.png"
-        if capture_screenshot(path):
-            with open(path, "rb") as f:
+        img = BASE_DIR / f"sc_{int(time.time())}.png"
+        if capture_screenshot(str(img)):
+            with open(img, "rb") as f:
                 files = {"file": ("screen.png", f.read(), "image/png")}
 
     payload = {"content": msg}
 
     try:
         if files:
-            requests.post(
-                url,
-                data={"payload_json": json.dumps(payload)},
-                files=files,
-                timeout=10
-            )
+            requests.post(url, data={"payload_json": json.dumps(payload)}, files=files, timeout=10)
         else:
             requests.post(url, json=payload, timeout=10)
     except:
         pass
 
-    if path and Path(path).exists():
-        os.remove(path)
+    if img and img.exists():
+        img.unlink()
 
-
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 # INSTÂNCIA
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 
 class Instance:
-    def __init__(self, pkg: str, cfg: MonitorConfig):
+    def __init__(self, pkg):
         self.pkg = pkg
         self.name = pkg.split(".")[-1].upper()
-        self.cfg = cfg
         self.pid = ""
         self.cpu = 0.0
         self.ram = 0
-        self.state = RobloxState.UNKNOWN
+        self.state = RobloxState.CLOSED
         self.cooldown = 0
         self.lock = threading.Lock()
 
@@ -267,46 +261,40 @@ class Instance:
             self.pid = get_pid(self.pkg)
             self.cpu = get_cpu(self.pid)
             self.ram = get_ram(self.pid)
-            self.state = detect_state(self.cpu, self.ram, self.cfg)
+            self.state = detect_state(self.cpu, self.ram)
 
-    def restart(self, reason: str):
+    def restart(self, reason):
         self.cooldown = time.time() + 120
         stop_app(self.pkg)
         time.sleep(0.5)
-        send_webhook(self.cfg.webhook_url, f"🔄 **{self.name}**: {reason}", True)
-        start_app_link(self.pkg, self.cfg.server_link)
+        send_webhook(f"🔄 **{self.name}**: {reason}", True)
+        start_app_link(self.pkg, LINKS["server_link"])
 
-
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 # MONITOR
-# ═══════════════════════════════════════════════════════════════
+# ==========================================================
 
 class Monitor:
     def __init__(self):
-        self.cfg = load_config()
         self.instances: Dict[str, Instance] = {}
+        self.logs = []
         self.running = False
-        self.logs: List[str] = []
 
-    def log(self, msg: str):
+    def log(self, m):
         t = datetime.now().strftime("%H:%M:%S")
-        self.logs.append(f"[{t}] {msg}")
+        self.logs.append(f"[{t}] {m}")
         self.logs = self.logs[-10:]
 
-    def worker(self, inst: Instance):
+    def worker(self, inst):
         while self.running:
             inst.update()
             if time.time() > inst.cooldown:
                 if inst.state in (RobloxState.CLOSED, RobloxState.HOME):
-                    self.log(f"{inst.name}: reiniciando")
+                    self.log(f"{inst.name}: reinício")
                     inst.restart(inst.state.value)
-            time.sleep(self.cfg.check_interval)
+            time.sleep(CFG.check_interval)
 
     def start(self):
-        if not adb_ok():
-            rprint("[red]ADB não conectado[/red]")
-            return
-
         pkgs = get_packages()
         if not pkgs:
             rprint("[yellow]Nenhum Roblox encontrado[/yellow]")
@@ -314,66 +302,65 @@ class Monitor:
 
         self.running = True
         for p in pkgs:
-            inst = Instance(p, self.cfg)
-            inst.cooldown = time.time() + 60
-            self.instances[p] = inst
-            threading.Thread(target=self.worker, args=(inst,), daemon=True).start()
+            i = Instance(p)
+            i.cooldown = time.time() + 60
+            self.instances[p] = i
+            threading.Thread(target=self.worker, args=(i,), daemon=True).start()
 
-        send_webhook(self.cfg.webhook_url, "🚀 Monitor iniciado")
+        send_webhook("🚀 Monitor iniciado")
 
-        with Live(self.render(), refresh_per_second=2, screen=True) as live:
-            try:
-                while self.running:
-                    live.update(self.render())
-                    time.sleep(0.5)
-            except KeyboardInterrupt:
-                self.running = False
-
-        send_webhook(self.cfg.webhook_url, "⏹️ Monitor finalizado")
+        with Live(self.render(), refresh_per_second=2, screen=True):
+            while self.running:
+                time.sleep(0.5)
 
     def render(self):
-        header = Text("SHORELINE v1", style="bold white on cyan", justify="center")
+        title = Text(
+            """
+███████╗██╗  ██╗███████╗██████╗  ██████╗ ██╗     ██╗███╗   ██╗███████╗
+██╔════╝██║  ██║██╔════╝██╔══██╗██╔═══██╗██║     ██║████╗  ██║██╔════╝
+███████╗███████║█████╗  ██████╔╝██║   ██║██║     ██║██╔██╗ ██║█████╗  
+╚════██║██╔══██║██╔══╝  ██╔══██╗██║   ██║██║     ██║██║╚██╗██║██╔══╝  
+███████║██║  ██║███████╗██║  ██║╚██████╔╝███████╗██║██║ ╚████║███████╗
+╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝╚═╝  ╚═══╝╚══════╝
+""",
+            style="bold cyan",
+            justify="center"
+        )
 
         table = Table(box=ROUNDED, expand=True, border_style="cyan")
-        table.add_column("INST", style="bold")
+        table.add_column("INST")
         table.add_column("CPU")
         table.add_column("RAM")
         table.add_column("ESTADO")
 
-        for inst in self.instances.values():
-            with inst.lock:
-                table.add_row(
-                    inst.name,
-                    f"{inst.cpu:.1f}%",
-                    f"{inst.ram} MB",
-                    inst.state.value
-                )
+        for i in self.instances.values():
+            with i.lock:
+                table.add_row(i.name, f"{i.cpu:.1f}%", f"{i.ram} MB", i.state.value)
 
         logs = Panel("\n".join(self.logs) or "...", border_style="cyan")
 
         layout = Layout()
         layout.split_column(
-            Layout(Align.center(header), size=3),
+            Layout(Align.center(title), size=9),
             Layout(table, size=12),
             Layout(logs, size=8)
         )
         return layout
 
+# ==========================================================
+# MAIN
+# ==========================================================
 
-# ═══════════════════════════════════════════════════════════════
-# MENU
-# ═══════════════════════════════════════════════════════════════
-
-def menu():
+def main():
+    adb_autosetup()
     mon = Monitor()
-    cfg = mon.cfg
 
     while True:
         os.system("cls" if os.name == "nt" else "clear")
-        rprint("[bold cyan]SHORELINE v1[/bold cyan]\n")
-        rprint("1 - Iniciar")
+        rprint("[bold cyan]SHEROLINE v1[/bold cyan]\n")
+        rprint("1 - Iniciar monitor")
         rprint("2 - Configurar Webhook")
-        rprint("3 - Configurar Link")
+        rprint("3 - Configurar Server Link")
         rprint("0 - Sair\n")
 
         c = Prompt.ask(">", choices=["0", "1", "2", "3"])
@@ -381,14 +368,13 @@ def menu():
         if c == "1":
             mon.start()
         elif c == "2":
-            cfg.webhook_url = Prompt.ask("Webhook URL")
-            save_config(cfg)
+            LINKS["webhook_url"] = Prompt.ask("Webhook URL")
+            save_links(LINKS)
         elif c == "3":
-            cfg.server_link = Prompt.ask("Server Link")
-            save_config(cfg)
+            LINKS["server_link"] = Prompt.ask("Server Link")
+            save_links(LINKS)
         elif c == "0":
             break
 
-
 if __name__ == "__main__":
-    menu()
+    main()
