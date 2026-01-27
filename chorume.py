@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Roblox AutoRejoin para Termux (UghPhone/VSPhone) - VERSÃO ATUALIZADA
-Monitora e reinicia automaticamente múltiplas instâncias do Roblox.
-Configuração: 8% CPU, 10s intervalos, verificação individual
+🌿 Roblox AutoRejoin - Nature Theme 🌿
+Interface verdejante para monitoramento de múltiplos Roblox
+Versão: 3.0 - Nature Theme
 """
 
 import os
@@ -13,100 +13,194 @@ import signal
 import subprocess
 import platform
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import urllib.request
 import zipfile
 import io
 
-# CONFIGURAÇÃO ATUALIZADA
-CONFIG_FILE = "autorejoin_config.json"
+# ============================================
+# 🌈 CONFIGURAÇÃO DO TEMA NATURE
+# ============================================
+class NatureTheme:
+    """Paleta de cores inspirada na natureza"""
+    # Cores ANSI em tons de verde
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    
+    # Tons de verde
+    MOSS = "\033[38;5;22m"       # Verde musgo escuro
+    FOREST = "\033[38;5;28m"     # Verde floresta
+    SPRING = "\033[38;5;34m"     # Verde primavera
+    LIME = "\033[38;5;46m"       # Verde limão
+    MINT = "\033[38;5;121m"      # Verde menta
+    SAGE = "\033[38;5;108m"      # Verde sálvia
+    EMERALD = "\033[38;5;42m"    # Verde esmeralda
+    PINE = "\033[38;5;23m"       # Verde pinho
+    
+    # Cores de acento
+    SUN = "\033[38;5;226m"       # Amarelo sol
+    EARTH = "\033[38;5;94m"      # Marrom terra
+    WATER = "\033[38;5;33m"      # Azul água
+    SKY = "\033[38;5;117m"       # Azul céu
+    
+    # Fundos
+    BG_DARK = "\033[48;5;234m"
+    BG_LIGHT = "\033[48;5;238m"
+    
+    # Símbolos da natureza
+    ICONS = {
+        "leaf": "🍃", "tree": "🌲", "seed": "🌱", "flower": "🌸",
+        "forest": "🌳", "mountain": "⛰️", "river": "🌊", "sun": "☀️",
+        "bug": "🐛", "bee": "🐝", "butterfly": "🦋", "bird": "🐦",
+        "rock": "🪨", "wood": "🪵", "fire": "🔥", "star": "⭐"
+    }
+
+# ============================================
+# ⚙️ CONFIGURAÇÃO DO SISTEMA
+# ============================================
+CONFIG_FILE = "nature_config.json"
 DEFAULT_CONFIG = {
     "web_link": "https://www.roblox.com/games/1537690962/Bee-Swarm-Simulator?privateServerLinkCode=05888256464342538313491710978310",
     "webhook_url": "",
-    "check_interval": 10,  # 10 segundos
-    "low_cpu_threshold": 8.0,  # 8%
-    "max_lowcpu_time": 10,  # 10 segundos
-    "cooldown_time": 10,  # 10 segundos
-    "packages": []  # Será preenchido automaticamente
+    "check_interval": 10,
+    "low_cpu_threshold": 8.0,
+    "max_lowcpu_time": 10,
+    "cooldown_time": 10,
+    "packages": []
 }
 
+# ============================================
+# 🎨 INTERFACE NATURE
+# ============================================
+class NatureUI:
+    """Interface gráfica no tema Nature"""
+    
+    @staticmethod
+    def clear_screen():
+        """Limpa a tela de forma elegante"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+    
+    @staticmethod
+    def print_header(title: str):
+        """Imprime cabeçalho estilizado"""
+        NatureUI.clear_screen()
+        print(f"\n{NatureTheme.BG_DARK}{NatureTheme.SUN}{'═'*70}{NatureTheme.RESET}")
+        print(f"{NatureTheme.BOLD}{NatureTheme.EMERALD}          🌿 {title} 🌿")
+        print(f"{NatureTheme.BG_DARK}{NatureTheme.SUN}{'═'*70}{NatureTheme.RESET}\n")
+    
+    @staticmethod
+    def print_box(content: str, color: str = NatureTheme.FOREST, icon: str = ""):
+        """Imprime conteúdo em uma caixa estilizada"""
+        lines = content.split('\n')
+        max_len = max(len(line) for line in lines)
+        
+        print(f"{color}{NatureTheme.BOLD}╔{'═'*(max_len + 2)}╗{NatureTheme.RESET}")
+        for line in lines:
+            spaces = max_len - len(line)
+            print(f"{color}{NatureTheme.BOLD}║ {icon}{line}{' '*spaces} ║{NatureTheme.RESET}")
+        print(f"{color}{NatureTheme.BOLD}╚{'═'*(max_len + 2)}╝{NatureTheme.RESET}")
+    
+    @staticmethod
+    def print_status(package: str, status: str, cpu: float = 0.0, extra: str = ""):
+        """Imprime status de um pacote com ícones"""
+        icons = {
+            "online": f"{NatureTheme.ICONS['tree']}",
+            "offline": f"{NatureTheme.ICONS['rock']}",
+            "restart": f"{NatureTheme.ICONS['seed']}",
+            "warning": f"{NatureTheme.ICONS['bug']}",
+            "cooldown": f"{NatureTheme.ICONS['flower']}",
+            "success": f"{NatureTheme.ICONS['butterfly']}"
+        }
+        
+        colors = {
+            "online": NatureTheme.EMERALD,
+            "offline": NatureTheme.EARTH,
+            "restart": NatureTheme.SUN,
+            "warning": NatureTheme.SUN,
+            "cooldown": NatureTheme.SAGE,
+            "success": NatureTheme.LIME
+        }
+        
+        icon = icons.get(status, NatureTheme.ICONS['star'])
+        color = colors.get(status, NatureTheme.FOREST)
+        
+        status_text = f"{color}{NatureTheme.BOLD}{icon} {package}"
+        if cpu > 0:
+            status_text += f" {NatureTheme.WATER}CPU: {cpu:.1f}%"
+        if extra:
+            status_text += f" {NatureTheme.SKY}{extra}"
+        status_text += f"{NatureTheme.RESET}"
+        
+        print(status_text)
+    
+    @staticmethod
+    def print_menu(options: List[Dict]):
+        """Imprime menu interativo"""
+        print(f"\n{NatureTheme.PINE}{NatureTheme.BOLD}╔{'═'*40}╗{NatureTheme.RESET}")
+        print(f"{NatureTheme.PINE}{NatureTheme.BOLD}║{' '*15}🌲 MENU 🌲{' '*15}║{NatureTheme.RESET}")
+        print(f"{NatureTheme.PINE}{NatureTheme.BOLD}╠{'═'*40}╣{NatureTheme.RESET}")
+        
+        for i, option in enumerate(options, 1):
+            icon = option.get('icon', NatureTheme.ICONS['leaf'])
+            color = option.get('color', NatureTheme.FOREST)
+            print(f"{NatureTheme.PINE}{NatureTheme.BOLD}║{NatureTheme.RESET} "
+                  f"{color}{icon} {i}. {option['text']:<33}{NatureTheme.RESET}"
+                  f"{NatureTheme.PINE}{NatureTheme.BOLD}║{NatureTheme.RESET}")
+        
+        print(f"{NatureTheme.PINE}{NatureTheme.BOLD}╚{'═'*40}╝{NatureTheme.RESET}")
+    
+    @staticmethod
+    def loading_animation(text: str, duration: int = 3):
+        """Animação de carregamento"""
+        frames = ["🌱", "🌿", "🍃", "🌾", "🌳", "🌲"]
+        for i in range(duration * 4):
+            frame = frames[i % len(frames)]
+            print(f"\r{NatureTheme.SPRING}{frame} {text}{'.' * (i % 4)}{' ' * 3}{NatureTheme.RESET}", end="")
+            time.sleep(0.25)
+        print()
+
+# ============================================
+# 🌱 SETUP PARA TERMUX
+# ============================================
 class TermuxSetup:
-    """Configuração automática para Termux (UghPhone/VSPhone)"""
+    """Configuração automática para Termux"""
     
     @staticmethod
     def is_termux() -> bool:
-        """Verifica se está executando no Termux"""
+        """Verifica se está no Termux"""
         return "com.termux" in os.environ.get("PREFIX", "")
     
     @staticmethod
-    def install_termux_adb() -> bool:
-        """
-        Instala o termux-adb (ADB sem root para Termux).
-        """
-        print("\n[SETUP] Instalando termux-adb...")
-        try:
-            # Método alternativo para Termux
-            commands = [
-                ["pkg", "update", "-y"],
-                ["pkg", "install", "android-tools", "-y"],
-                ["pkg", "install", "termux-api", "-y"]
-            ]
-            
-            for cmd in commands:
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    print(f"[AVISO] Comando {' '.join(cmd)} falhou: {result.stderr}")
-            
-            # Verifica se adb está disponível
-            result = subprocess.run(["adb", "--version"], capture_output=True, text=True)
-            if result.returncode == 0:
-                print("[SUCESSO] ADB instalado")
-                return True
-            else:
-                print("[AVISO] Usando adb do Termux")
-                return True
-                
-        except Exception as e:
-            print(f"[ERRO] Exceção durante instalação: {e}")
-            return False
-    
-    @staticmethod
-    def install_python_packages():
-        """Instala pacotes Python necessários"""
-        required = ["requests"]
-        try:
-            import importlib.util
-            
-            for package in required:
-                if importlib.util.find_spec(package) is None:
-                    print(f"[SETUP] Instalando {package}...")
-                    subprocess.run([sys.executable, "-m", "pip", "install", package], 
-                                 capture_output=True)
-                    print(f"[OK] {package} instalado")
-        except Exception as e:
-            print(f"[AVISO] Não foi possível instalar pacotes: {e}")
-    
-    @staticmethod
-    def setup_android_debugging():
-        """Guia para habilitar depuração USB no dispositivo"""
-        print("\n" + "="*60)
-        print("[CONFIGURAÇÃO ANDROID PARA UghPhone/VSPhone]")
-        print("="*60)
-        print("1. No dispositivo Android:")
-        print("   - Configurações > Sistema > Sobre o telefone")
-        print("   - Toque 7x em 'Número da versão' para habilitar Opções do desenvolvedor")
-        print("   - Volte para Configurações > Sistema > Opções do desenvolvedor")
-        print("   - Ative 'Depuração USB'")
-        print("   - Ative 'Depuração via Wi-Fi' (se disponível)")
-        print("\n2. No Termux, conecte:")
-        print("   - Conecte via USB: adb devices")
-        print("   - OU conecte via Wi-Fi:")
-        print("     adb tcpip 5555")
-        print("     adb connect IP_DO_DISPOSITIVO:5555")
-        print("\n3. Autorize a conexão no dispositivo quando aparecer")
-        print("="*60)
+    def install_dependencies():
+        """Instala dependências com interface bonita"""
+        NatureUI.print_header("Instalando Dependências")
+        
+        steps = [
+            {"icon": "🌱", "text": "Atualizando pacotes Termux", "cmd": ["pkg", "update", "-y"]},
+            {"icon": "🌿", "text": "Instalando Android Tools", "cmd": ["pkg", "install", "android-tools", "-y"]},
+            {"icon": "🍃", "text": "Instalando Python packages", "cmd": [sys.executable, "-m", "pip", "install", "requests"]},
+        ]
+        
+        for step in steps:
+            print(f"\n{NatureTheme.SPRING}{step['icon']} {step['text']}...{NatureTheme.RESET}")
+            try:
+                result = subprocess.run(step['cmd'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    print(f"{NatureTheme.EMERALD}✓ Concluído{NatureTheme.RESET}")
+                else:
+                    print(f"{NatureTheme.SUN}⚠️ Continuando mesmo com aviso{NatureTheme.RESET}")
+            except Exception:
+                print(f"{NatureTheme.SUN}⚠️ Etapa pulada{NatureTheme.RESET}")
+        
+        NatureUI.loading_animation("Finalizando instalação")
+        print(f"\n{NatureTheme.EMERALD}{NatureTheme.ICONS['butterfly']} Dependências instaladas com sucesso!{NatureTheme.RESET}")
 
+# ============================================
+# 🎮 MONITOR ROBLOX
+# ============================================
 class RobloxMonitor:
+    """Monitor inteligente de instâncias Roblox"""
+    
     def __init__(self, config: dict):
         self.config = config
         self.proto_activity = "com.roblox.client.ActivityProtocolLaunch"
@@ -114,114 +208,66 @@ class RobloxMonitor:
         self.cooldown: Dict[str, float] = {}
         self.max_count = config["max_lowcpu_time"] // config["check_interval"]
         self.running = True
-        self.last_check_time: Dict[str, float] = {}
         
-        # Usar termux-adb se estiver no Termux
-        self.adb_cmd = "adb"
-        if TermuxSetup.is_termux():
-            self.adb_cmd = "adb"
-        
-        # Configurar signal handlers
+        # Signal handlers
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
     
     def signal_handler(self, signum, frame):
-        print("\n[INFO] Encerrando monitoramento...")
+        """Handler para encerramento gracioso"""
+        print(f"\n{NatureTheme.SUN}{NatureTheme.ICONS['flower']} Encerrando monitoramento...{NatureTheme.RESET}")
         self.running = False
     
     def run_adb_command(self, command: str) -> str:
-        """Executa um comando ADB e retorna a saída"""
+        """Executa comando ADB com segurança"""
         try:
-            cmd_parts = [self.adb_cmd] + command.split()
+            cmd_parts = ["adb"] + command.split()
             result = subprocess.run(cmd_parts, capture_output=True, text=True, timeout=10)
             return result.stdout.strip()
-        except subprocess.TimeoutExpired:
-            print(f"[ERRO] Timeout no comando ADB: {command}")
-            return ""
-        except FileNotFoundError:
-            print(f"[ERRO] {self.adb_cmd} não encontrado. Execute o setup primeiro.")
-            return ""
         except Exception as e:
-            print(f"[ERRO] Falha ao executar ADB: {e}")
             return ""
     
     def detect_roblox_packages(self) -> List[str]:
-        """
-        Detecta automaticamente todos os pacotes do Roblox instalados.
-        Usa o comando 'pm list packages' para listar pacotes.
-        """
-        print("[DETECT] Procurando pacotes do Roblox...")
+        """Detecta pacotes Roblox automaticamente"""
+        NatureUI.print_header("Detectando Pacotes Roblox")
+        
         packages = []
-        
-        # Lista todos os pacotes
         output = self.run_adb_command("shell pm list packages")
-        if not output:
-            print("[ERRO] Não foi possível listar pacotes. Verifique conexão ADB.")
-            return packages
         
-        # Filtra pacotes do Roblox
-        roblox_keywords = ["com.roblox", "com.roblox.client", "roblox"]
-        for line in output.split('\n'):
-            if line.startswith("package:"):
-                pkg = line.replace("package:", "").strip()
-                if any(keyword in pkg.lower() for keyword in roblox_keywords):
+        if output:
+            for line in output.split('\n'):
+                if line.startswith("package:") and "com.roblox" in line.lower():
+                    pkg = line.replace("package:", "").strip()
                     packages.append(pkg)
         
         if packages:
-            print(f"[DETECT] Encontrados {len(packages)} pacotes:")
-            for i, pkg in enumerate(packages, 1):
-                print(f"  {i}. {pkg}")
+            print(f"\n{NatureTheme.EMERALD}{NatureTheme.ICONS['forest']} Encontrados {len(packages)} pacotes:{NatureTheme.RESET}")
+            for pkg in packages:
+                print(f"  {NatureTheme.SPRING}• {pkg}{NatureTheme.RESET}")
         else:
-            print("[DETECT] Nenhum pacote do Roblox encontrado.")
-            print("[DETECT] Instale o Roblox no dispositivo primeiro.")
+            print(f"\n{NatureTheme.SUN}{NatureTheme.ICONS['rock']} Nenhum pacote encontrado{NatureTheme.RESET}")
         
         return packages
     
     def get_pid(self, package: str) -> Optional[str]:
-        """Obtém o PID do pacote"""
-        output = self.run_adb_command(f"shell pidof {package}")
-        return output if output else None
+        """Obtém PID do pacote"""
+        return self.run_adb_command(f"shell pidof {package}")
     
-    def get_cpu_by_pid(self, pid: str) -> float:
-        """
-        Obtém o uso de CPU pelo PID.
-        Nova implementação: usa 'ps -p PID -o %cpu' para maior precisão.
-        """
+    def get_cpu_usage(self, pid: str) -> float:
+        """Obtém uso de CPU do processo"""
         try:
-            # Método mais preciso para obter CPU
-            cmd = f"shell ps -p {pid} -o %cpu 2>/dev/null || shell top -n 1 -b | grep '^{pid}'"
-            output = self.run_adb_command(cmd)
-            
-            if not output:
-                return 0.0
-            
-            # Processa a saída para extrair CPU
-            for line in output.split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                # Remove caracteres não numéricos
-                import re
-                cpu_match = re.search(r'([\d.]+)', line)
-                if cpu_match:
-                    cpu_str = cpu_match.group(1)
-                    try:
-                        return float(cpu_str)
-                    except ValueError:
-                        pass
-            
-            return 0.0
-            
-        except Exception as e:
-            print(f"[DEBUG] Erro ao obter CPU para PID {pid}: {e}")
-            return 0.0
+            output = self.run_adb_command(f"shell top -n 1 -b | grep '^{pid}'")
+            if output:
+                parts = output.split()
+                if len(parts) >= 9:
+                    cpu_str = parts[8].replace(',', '.').replace('%', '')
+                    return float(cpu_str)
+        except:
+            pass
+        return 0.0
     
-    def check_package_running(self, package: str) -> Dict:
-        """
-        Verifica o status completo de um pacote.
-        Retorna dicionário com informações.
-        """
+    def check_package_status(self, package: str) -> Dict:
+        """Verifica status completo do pacote"""
         pid = self.get_pid(package)
         status = {
             "package": package,
@@ -232,429 +278,307 @@ class RobloxMonitor:
         }
         
         if pid:
-            cpu_usage = self.get_cpu_by_pid(pid)
-            status["cpu"] = cpu_usage
+            cpu = self.get_cpu_usage(pid)
+            status["cpu"] = cpu
             
-            # Verifica se CPU está baixa
-            if cpu_usage <= self.config["low_cpu_threshold"]:
+            if cpu <= self.config["low_cpu_threshold"]:
                 self.lowcpu_count[package] = self.lowcpu_count.get(package, 0) + 1
-                status["low_cpu_count"] = self.lowcpu_count[package]
-                
-                # Se CPU baixa atingiu o limite, precisa reiniciar
                 if self.lowcpu_count[package] >= self.max_count:
                     status["needs_restart"] = True
             else:
-                # CPU normal, resetar contador
                 self.lowcpu_count[package] = 0
-                status["low_cpu_count"] = 0
         
         return status
     
-    def open_vip(self, package: str):
+    def soft_restart(self, package: str) -> bool:
         """
-        Abre o servidor VIP no pacote.
-        Método otimizado para UghPhone/VSPhone.
-        """
-        print(f"[OPEN] Abrindo VIP em {package}")
-        
-        # Fecha qualquer instância anterior
-        self.run_adb_command(f"shell am force-stop {package}")
-        time.sleep(1.5)
-        
-        # Limpa cache para garantir limpeza
-        self.run_adb_command(f"shell pm clear {package}")
-        time.sleep(1)
-        
-        # Abre o link VIP
-        cmd = (
-            f"shell am start -n {package}/{self.proto_activity} "
-            f"-a android.intent.action.VIEW -d \"{self.config['web_link']}\""
-        )
-        result = self.run_adb_command(cmd)
-        
-        # Espera tempo otimizado
-        wait_time = 8 if TermuxSetup.is_termux() else 6
-        time.sleep(wait_time)
-        
-        # Verifica se abriu corretamente
-        pid = self.get_pid(package)
-        if pid:
-            print(f"[SUCCESS] {package} iniciado com PID: {pid}")
-            return True
-        else:
-            print(f"[WARN] {package} pode não ter aberto corretamente")
-            # Tenta abrir novamente
-            time.sleep(2)
-            self.run_adb_command(cmd)
-            time.sleep(wait_time)
-            return self.get_pid(package) is not None
-    
-    def restart_package(self, package: str):
-        """
-        Reinicia completamente um pacote INDIVIDUALMENTE.
-        Otimizado para 10s cooldown.
+        Reinício SUAVE que preserva o login.
+        NÃO usa 'pm clear' que apaga dados!
         """
         current_time = time.time()
         
-        # Verifica se está em cooldown
+        # Verifica cooldown
         if package in self.cooldown and current_time < self.cooldown[package]:
             remaining = self.cooldown[package] - current_time
-            print(f"[COOLDOWN] {package} aguardando {remaining:.1f}s")
+            NatureUI.print_status(package, "cooldown", extra=f"⌛ {remaining:.0f}s")
             return False
         
-        print(f"\n{'='*60}")
-        print(f"[RESTART INDIVIDUAL] {package}")
-        print(f"{'='*60}")
+        NatureUI.print_status(package, "restart", extra="🔄 Reiniciando...")
         
-        pid_before = self.get_pid(package)
-        print(f"[INFO] PID antes: {pid_before if pid_before else 'Nenhum'}")
+        # 1. Apenas força parada (NÃO limpa dados)
+        self.run_adb_command(f"shell am force-stop {package}")
+        time.sleep(2)
         
-        # Reinicia o pacote
+        # 2. Limpa APENAS cache (opcional, mas seguro)
+        self.run_adb_command(f"shell pm clear --cache-only {package}")
+        time.sleep(1)
+        
+        # 3. Abre o VIP
         success = self.open_vip(package)
         
-        pid_after = self.get_pid(package)
-        print(f"[INFO] PID depois: {pid_after if pid_after else 'Nenhum'}")
+        # 4. Aplica cooldown
+        self.cooldown[package] = time.time() + self.config["cooldown_time"]
+        self.lowcpu_count[package] = 0
         
         if success:
-            print(f"[SUCESSO] {package} reiniciado")
+            NatureUI.print_status(package, "success", extra="✅ Reiniciado com sucesso")
         else:
-            print(f"[FALHA] {package} não foi reiniciado corretamente")
-        
-        print(f"{'='*60}\n")
-        
-        # Define cooldown de 10 segundos
-        self.cooldown[package] = time.time() + self.config["cooldown_time"]
-        
-        # Reseta contador de CPU baixa para este pacote
-        self.lowcpu_count[package] = 0
+            NatureUI.print_status(package, "warning", extra="⚠️ Pode precisar de login")
         
         return success
     
-    def send_webhook(self, message: str, package: str = ""):
-        """Envia notificação para webhook com informações do pacote"""
-        if not self.config.get("webhook_url"):
-            return
+    def open_vip(self, package: str) -> bool:
+        """Abre servidor VIP sem apagar login"""
+        # APENAS force-stop, NUNCA pm clear completo!
+        self.run_adb_command(f"shell am force-stop {package}")
+        time.sleep(1.5)
         
-        try:
-            import requests
-            data = {
-                "content": message,
-                "username": "Roblox AutoRejoin",
-                "embeds": [{
-                    "title": f"Reinício Individual - {package}" if package else "Status Geral",
-                    "description": message,
-                    "color": 0x00ff00 if "SUCESSO" in message else 0xff0000,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "fields": [
-                        {"name": "Pacote", "value": package, "inline": True},
-                        {"name": "Hora", "value": datetime.now().strftime("%H:%M:%S"), "inline": True}
-                    ]
-                }]
-            }
-            requests.post(self.config["webhook_url"], json=data, timeout=5)
-        except ImportError:
-            print("[INFO] Instale requests para usar webhook: pip install requests")
-        except Exception as e:
-            print(f"[ERRO] Webhook falhou: {e}")
-    
-    def check_device_connected(self) -> bool:
-        """Verifica se há dispositivo Android conectado"""
-        output = self.run_adb_command("devices")
-        if not output:
-            return False
+        cmd = (f"shell am start -n {package}/{self.proto_activity} "
+               f"-a android.intent.action.VIEW -d \"{self.config['web_link']}\"")
+        self.run_adb_command(cmd)
+        time.sleep(6)
         
-        devices = [line for line in output.split('\n') if '\tdevice' in line]
-        return len(devices) > 0
+        return self.get_pid(package) is not None
     
     def monitor(self):
-        """
-        Loop principal de monitoramento ATUALIZADO.
-        Verifica cada pacote INDIVIDUALMENTE e reinicia apenas os que precisam.
-        """
-        print("\n" + "="*70)
-        print("[MONITOR] Iniciando AutoRejoin ATUALIZADO")
-        print("="*70)
-        print(f"[CONFIG] CPU limite: {self.config['low_cpu_threshold']}%")
-        print(f"[CONFIG] Intervalo: {self.config['check_interval']}s")
-        print(f"[CONFIG] Cooldown: {self.config['cooldown_time']}s")
-        print(f"[CONFIG] Pacotes: {len(self.config['packages'])}")
-        print("="*70)
-        print("[CTRL+C] para parar o monitoramento")
-        print("="*70 + "\n")
+        """Loop principal de monitoramento"""
+        NatureUI.print_header("Monitoramento Nature Ativo")
         
-        # Inicializa todos os pacotes uma vez
-        print("[INIT] Iniciando todos os pacotes...")
+        print(f"{NatureTheme.WATER}╔══════════════════════════════════════════════════════╗")
+        print(f"║  🌿  Configuração: {self.config['low_cpu_threshold']}% CPU • {self.config['check_interval']}s • {len(self.config['packages'])} pacotes  🌿  ║")
+        print(f"╚══════════════════════════════════════════════════════╝{NatureTheme.RESET}\n")
+        
+        # Inicialização suave
         for package in self.config["packages"]:
-            self.restart_package(package)
-            time.sleep(2)  # Pequena pausa entre inícios
+            NatureUI.print_status(package, "online", extra="🌱 Iniciando...")
+            self.soft_restart(package)
+            time.sleep(3)
         
-        cycle_count = 0
-        
-        # Loop de monitoramento
+        cycle = 0
         while self.running:
-            cycle_count += 1
-            current_time = time.time()
+            cycle += 1
             
-            print(f"\n[🔁 CICLO {cycle_count}] {datetime.now().strftime('%H:%M:%S')}")
-            print("-" * 50)
+            print(f"\n{NatureTheme.PINE}{NatureTheme.BOLD}═══════ Ciclo {cycle} • {datetime.now().strftime('%H:%M:%S')} ═══════{NatureTheme.RESET}")
             
             for package in self.config["packages"]:
-                # Verifica status do pacote
-                status = self.check_package_running(package)
+                status = self.check_package_status(package)
                 
                 if not status["running"]:
-                    # Pacote não está em execução
-                    print(f"[❌ OFFLINE] {package}")
-                    self.restart_package(package)
-                    self.send_webhook(f"❌ {package} reiniciado (offline)", package)
+                    NatureUI.print_status(package, "offline", extra="❌ Offline")
+                    self.soft_restart(package)
                     
                 elif status["needs_restart"]:
-                    # Pacote com CPU baixa por tempo suficiente
-                    print(f"[⚠️ CPU BAIXA] {package}: {status['cpu']:.1f}% "
-                          f"(contagem: {status['low_cpu_count']}/{self.max_count})")
-                    self.restart_package(package)
-                    self.send_webhook(f"⚠️ {package} reiniciado (CPU baixa: {status['cpu']:.1f}%)", package)
+                    NatureUI.print_status(package, "warning", status["cpu"], "⚠️ CPU baixa")
+                    self.soft_restart(package)
                     
                 elif status["cpu"] <= self.config["low_cpu_threshold"]:
-                    # CPU baixa mas ainda não atingiu limite
                     count = self.lowcpu_count.get(package, 0)
-                    print(f"[📉 MONITOR] {package}: {status['cpu']:.1f}% "
-                          f"({count}/{self.max_count})")
+                    NatureUI.print_status(package, "online", status["cpu"], f"📉 {count}/{self.max_count}")
                     
                 else:
-                    # CPU normal
-                    print(f"[✅ OK] {package}: {status['cpu']:.1f}%")
+                    NatureUI.print_status(package, "online", status["cpu"], "✅ Normal")
             
-            # Aguarda intervalo de 10 segundos
-            print("-" * 50)
-            print(f"[⏱️ AGUARDANDO] {self.config['check_interval']} segundos...")
-            time.sleep(self.config["check_interval"])
+            # Contagem regressiva elegante
+            for i in range(self.config["check_interval"], 0, -1):
+                print(f"\r{NatureTheme.SAGE}Aguardando {i}s... {NatureTheme.ICONS['leaf']}{NatureTheme.RESET}", end="")
+                time.sleep(1)
+            print()
 
+# ============================================
+# ⚙️ GERENCIAMENTO DE CONFIGURAÇÃO
+# ============================================
 def load_config() -> dict:
-    """Carrega a configuração do arquivo JSON"""
+    """Carrega configuração do arquivo"""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-                # Garante que os novos campos existam
-                if "check_interval" not in config:
-                    config["check_interval"] = 10
-                if "low_cpu_threshold" not in config:
-                    config["low_cpu_threshold"] = 8.0
-                if "max_lowcpu_time" not in config:
-                    config["max_lowcpu_time"] = 10
-                if "cooldown_time" not in config:
-                    config["cooldown_time"] = 10
-                return config
-        except Exception as e:
-            print(f"[ERRO] Falha ao carregar configuração: {e}")
+                # Garante valores padrão
+                defaults = DEFAULT_CONFIG.copy()
+                defaults.update(config)
+                return defaults
+        except:
+            pass
     
-    # Retorna configuração padrão atualizada
     return DEFAULT_CONFIG.copy()
 
 def save_config(config: dict):
-    """Salva a configuração no arquivo JSON"""
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        print(f"[CONFIG] Configuração salva em {CONFIG_FILE}")
-    except Exception as e:
-        print(f"[ERRO] Falha ao salvar configuração: {e}")
+    """Salva configuração no arquivo"""
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
 def setup_wizard():
-    """Assistente de configuração inicial ATUALIZADO"""
-    print("\n" + "="*60)
-    print("[SETUP WIZARD] Configuração ATUALIZADA")
-    print("="*60)
+    """Assistente de configuração com tema Nature"""
+    NatureUI.print_header("Assistente de Configuração")
     
     config = load_config()
     
-    # Configurar link VIP
-    print(f"\n[1] Link VIP atual: {config['web_link']}")
-    change = input("Deseja alterar o link VIP? (s/n): ").lower()
-    if change == 's':
-        new_link = input("Novo link VIP: ").strip()
-        if new_link:
-            config['web_link'] = new_link
-            print("[OK] Link VIP atualizado")
+    # Link VIP
+    print(f"\n{NatureTheme.SPRING}1. Link do Servidor VIP:{NatureTheme.RESET}")
+    print(f"{NatureTheme.SAGE}Atual: {config['web_link'][:50]}...{NatureTheme.RESET}")
+    if input(f"{NatureTheme.MINT}Alterar? (s/n): {NatureTheme.RESET}").lower() == 's':
+        config['web_link'] = input(f"{NatureTheme.MINT}Novo link: {NatureTheme.RESET}").strip()
     
-    # Configurar webhook
-    print(f"\n[2] Webhook atual: {config['webhook_url'] or 'Não configurado'}")
-    change = input("Deseja configurar webhook? (s/n): ").lower()
-    if change == 's':
-        webhook = input("URL do webhook (Discord/Telegram): ").strip()
-        if webhook:
-            config['webhook_url'] = webhook
-            print("[OK] Webhook configurado")
+    # Webhook
+    print(f"\n{NatureTheme.SPRING}2. Webhook Discord:{NatureTheme.RESET}")
+    print(f"{NatureTheme.SAGE}Atual: {config['webhook_url'] or 'Não configurado'}{NatureTheme.RESET}")
+    if input(f"{NatureTheme.MINT}Configurar? (s/n): {NatureTheme.RESET}").lower() == 's':
+        config['webhook_url'] = input(f"{NatureTheme.MINT}URL do webhook: {NatureTheme.RESET}").strip()
     
-    # Configurar intervalos ATUALIZADOS
-    print("\n[3] Configurações de monitoramento (ATUALIZADO):")
-    print("   - Verificação a cada 10 segundos")
-    print("   - CPU limite: 8%")
-    print("   - Cooldown: 10 segundos")
+    # Configurações
+    print(f"\n{NatureTheme.SPRING}3. Configurações de Monitoramento:{NatureTheme.RESET}")
+    print(f"{NatureTheme.MINT}Manter configurações recomendadas? (8% CPU, 10s intervalo){NatureTheme.RESET}")
     
-    confirm = input("\nManter configurações otimizadas? (s/n): ").lower()
-    if confirm == 'n':
+    if input(f"{NatureTheme.SAGE}(s/n): {NatureTheme.RESET}").lower() == 'n':
         try:
-            interval = int(input(f"Intervalo de verificação (segundos) [10]: ") or 10)
-            threshold = float(input(f"Limite de CPU baixa (%) [8.0]: ") or 8.0)
-            max_time = int(input(f"Tempo máximo de CPU baixa (segundos) [10]: ") or 10)
-            cooldown = int(input(f"Tempo de cooldown (segundos) [10]: ") or 10)
-            
-            config.update({
-                'check_interval': interval,
-                'low_cpu_threshold': threshold,
-                'max_lowcpu_time': max_time,
-                'cooldown_time': cooldown
-            })
-        except ValueError:
-            print("[ERRO] Valores inválidos. Mantendo configurações atuais.")
+            config['low_cpu_threshold'] = float(input(f"{NatureTheme.MINT}Limite de CPU (%): {NatureTheme.RESET}") or 8.0)
+            config['check_interval'] = int(input(f"{NatureTheme.MINT}Intervalo (segundos): {NatureTheme.RESET}") or 10)
+            config['cooldown_time'] = int(input(f"{NatureTheme.MINT}Cooldown (segundos): {NatureTheme.RESET}") or 10)
+        except:
+            print(f"{NatureTheme.SUN}⚠️ Valores inválidos, mantendo padrão{NatureTheme.RESET}")
     
     save_config(config)
+    print(f"\n{NatureTheme.EMERALD}{NatureTheme.ICONS['butterfly']} Configuração salva!{NatureTheme.RESET}")
     return config
 
+# ============================================
+# 📱 MENU PRINCIPAL
+# ============================================
 def main_menu():
-    """Menu principal interativo ATUALIZADO"""
+    """Menu principal com tema Nature"""
+    
+    menu_options = [
+        {"icon": "🌿", "text": "Iniciar Monitoramento", "color": NatureTheme.EMERALD},
+        {"icon": "⚙️", "text": "Configurações", "color": NatureTheme.SPRING},
+        {"icon": "🔍", "text": "Detectar Pacotes", "color": NatureTheme.MINT},
+        {"icon": "📦", "text": "Instalar Dependências", "color": NatureTheme.SAGE},
+        {"icon": "📖", "text": "Guia de Conexão", "color": NatureTheme.WATER},
+        {"icon": "🌅", "text": "Sair", "color": NatureTheme.SUN}
+    ]
+    
     while True:
-        print("\n" + "="*60)
-        print("[ROBLOX AUTOREJOIN - VERSÃO ATUALIZADA]")
-        print("="*60)
-        print("[CONFIGURAÇÃO ATUAL]")
+        NatureUI.print_header("Roblox AutoRejoin - Nature Theme")
+        
+        # Status atual
         config = load_config()
-        print(f"  • CPU limite: {config['low_cpu_threshold']}%")
-        print(f"  • Intervalo: {config['check_interval']}s")
-        print(f"  • Cooldown: {config['cooldown_time']}s")
-        print(f"  • Pacotes: {len(config.get('packages', []))}")
-        print("="*60)
-        print("1. 🚀 Iniciar monitoramento (8% CPU, 10s)")
-        print("2. ⚙️ Configurar (VIP, Webhook, Intervalos)")
-        print("3. 🔍 Detectar pacotes do Roblox automaticamente")
-        print("4. 📦 Instalar dependências (Termux-ADB)")
-        print("5. 📖 Guia de configuração Android")
-        print("6. 🔧 Verificar conexão ADB")
-        print("7. ❌ Sair")
-        print("="*60)
+        print(f"{NatureTheme.FOREST}Configuração Atual:{NatureTheme.RESET}")
+        print(f"  {NatureTheme.SPRING}• CPU Limite: {config['low_cpu_threshold']}%")
+        print(f"  {NatureTheme.MINT}• Intervalo: {config['check_interval']}s")
+        print(f"  {NatureTheme.SAGE}• Pacotes: {len(config.get('packages', []))}")
+        print(f"  {NatureTheme.WATER}• Webhook: {'✅' if config['webhook_url'] else '❌'}")
+        print()
         
-        choice = input("\nEscolha uma opção (1-7): ").strip()
+        NatureUI.print_menu(menu_options)
         
-        if choice == '1':
+        try:
+            choice = int(input(f"\n{NatureTheme.EMERALD}{NatureTheme.ICONS['leaf']} Escolha (1-6): {NatureTheme.RESET}"))
+        except:
+            continue
+        
+        if choice == 1:
             # Iniciar monitoramento
             config = load_config()
             
-            # Verifica se há pacotes configurados
             if not config.get("packages"):
-                print("[INFO] Nenhum pacote configurado. Detectando automaticamente...")
-                monitor = RobloxMonitor(config)
-                packages = monitor.detect_roblox_packages()
-                if packages:
-                    config["packages"] = packages
-                    save_config(config)
-                else:
-                    print("[ERRO] Não há pacotes para monitorar.")
-                    continue
-            
-            # Verifica conexão ADB
-            monitor = RobloxMonitor(config)
-            if not monitor.check_device_connected():
-                print("[ERRO] Nenhum dispositivo conectado.")
-                print("[INFO] Execute a opção 4 para instalar dependências.")
-                print("[INFO] Execute a opção 5 para guia de configuração.")
+                print(f"\n{NatureTheme.SUN}{NatureTheme.ICONS['bug']} Nenhum pacote configurado!{NatureTheme.RESET}")
+                print(f"{NatureTheme.MINT}Execute 'Detectar Pacotes' primeiro.{NatureTheme.RESET}")
+                input(f"\n{NatureTheme.SAGE}Pressione Enter...{NatureTheme.RESET}")
                 continue
             
-            # Inicia monitoramento
+            monitor = RobloxMonitor(config)
             monitor.monitor()
             
-        elif choice == '2':
-            # Configuração
-            config = setup_wizard()
+        elif choice == 2:
+            # Configurações
+            setup_wizard()
             
-        elif choice == '3':
+        elif choice == 3:
             # Detectar pacotes
             config = load_config()
             monitor = RobloxMonitor(config)
             packages = monitor.detect_roblox_packages()
+            
             if packages:
                 config["packages"] = packages
                 save_config(config)
-                print(f"[SUCESSO] {len(packages)} pacotes salvos na configuração")
-            else:
-                print("[INFO] Nenhum pacote detectado.")
-        
-        elif choice == '4':
+                print(f"\n{NatureTheme.EMERALD}{NatureTheme.ICONS['butterfly']} {len(packages)} pacotes salvos!{NatureTheme.RESET}")
+            
+            input(f"\n{NatureTheme.SAGE}Pressione Enter...{NatureTheme.RESET}")
+            
+        elif choice == 4:
             # Instalar dependências
-            if not TermuxSetup.is_termux():
-                print("[INFO] Esta opção é apenas para Termux.")
-                continue
-            
-            print("\n[SETUP] Instalando dependências para Termux...")
-            
-            # Atualizar pacotes
-            print("[SETUP] Atualizando pacotes Termux...")
-            subprocess.run(["pkg", "update", "-y"], capture_output=True)
-            subprocess.run(["pkg", "upgrade", "-y"], capture_output=True)
-            
-            # Instalar termux-adb
-            if TermuxSetup.install_termux_adb():
-                print("[SUCESSO] Dependências instaladas com sucesso!")
+            if TermuxSetup.is_termux():
+                TermuxSetup.install_dependencies()
             else:
-                print("[ERRO] Falha na instalação. Consulte o guia (opção 5).")
+                print(f"\n{NatureTheme.SUN}⚠️ Esta opção é apenas para Termux{NatureTheme.RESET}")
+            input(f"\n{NatureTheme.SAGE}Pressione Enter...{NatureTheme.RESET}")
             
-            # Instalar pacotes Python
-            TermuxSetup.install_python_packages()
-        
-        elif choice == '5':
-            # Guia de configuração
-            TermuxSetup.setup_android_debugging()
+        elif choice == 5:
+            # Guia de conexão
+            NatureUI.print_header("Guia de Conexão")
+            guide = """
+            1. No dispositivo Android (UghPhone/VSPhone):
+               • Configurações > Sistema > Sobre o telefone
+               • Toque 7x em 'Número da versão'
+               • Volte para Opções do Desenvolvedor
+               • Ative 'Depuração USB'
             
-        elif choice == '6':
-            # Verificar conexão ADB
-            print("\n[TESTE] Verificando conexão ADB...")
-            monitor = RobloxMonitor(load_config())
-            if monitor.check_device_connected():
-                print("[✅] Dispositivo conectado!")
-                # Listar dispositivos
-                devices = monitor.run_adb_command("devices")
-                print(f"\nDispositivos:\n{devices}")
-                
-                # Testar comandos básicos
-                print("\n[TESTE] Testando comandos ADB...")
-                version = monitor.run_adb_command("version")
-                print(f"ADB Version:\n{version[:100]}...")
-            else:
-                print("[❌] Nenhum dispositivo conectado.")
-                print("\n[SOLUÇÃO]")
-                print("1. Conecte o dispositivo via USB")
-                print("2. Ative Depuração USB")
-                print("3. Execute: adb devices")
-                print("4. Autorize no dispositivo")
-        
-        elif choice == '7':
-            print("\n[INFO] Saindo...")
+            2. Conecte via USB ou Wi-Fi:
+               USB: Conecte o cabo e autorize
+               Wi-Fi: adb tcpip 5555
+                     adb connect IP:5555
+            
+            3. Teste a conexão:
+               adb devices
+               (Deve mostrar 'device')
+            """
+            NatureUI.print_box(guide, NatureTheme.SAGE, "📖")
+            input(f"\n{NatureTheme.SAGE}Pressione Enter...{NatureTheme.RESET}")
+            
+        elif choice == 6:
+            # Sair
+            print(f"\n{NatureTheme.EMERALD}{NatureTheme.ICONS['flower']} Até logo! Que a natureza esteja com você! 🌿{NatureTheme.RESET}")
             sys.exit(0)
-        
-        else:
-            print("[ERRO] Opção inválida. Tente novamente.")
 
+# ============================================
+# 🚀 INICIALIZAÇÃO
+# ============================================
 def main():
     """Função principal"""
-    print("\n" + "="*70)
-    print("ROBLOX AUTOREJOIN - VERSÃO ATUALIZADA (8% CPU, 10s)")
-    print("="*70)
-    print("Especialmente otimizado para:")
-    print("  • UghPhone / VSPhone / Termux")
-    print("  • Monitoramento individual por pacote")
-    print("  • Configuração: 8% CPU limite, 10s intervalos")
-    print("  • Reinício apenas do pacote problemático")
-    print("="*70)
-    
-    # Verificar se está no Termux
+    # Verifica ambiente
     if TermuxSetup.is_termux():
-        print("[INFO] ✅ Ambiente Termux detectado (UghPhone/VSPhone)")
+        env = "Termux 🌿"
     else:
-        print("[INFO] Ambiente padrão detectado")
+        env = "Ambiente Padrão"
     
-    # Executar menu principal
+    # Banner inicial
+    NatureUI.clear_screen()
+    print(f"\n{NatureTheme.BG_DARK}{NatureTheme.SUN}{'═'*70}{NatureTheme.RESET}")
+    print(f"{NatureTheme.BOLD}{NatureTheme.EMERALD}")
+    print("     🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳")
+    print("     🌳                                        🌳")
+    print("     🌳      ROBLOX AUTOREJOIN - NATURE       🌳")
+    print("     🌳           🌿 Version 3.0 🌿           🌳")
+    print("     🌳                                        🌳")
+    print("     🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳🌳")
+    print(f"{NatureTheme.RESET}")
+    print(f"{NatureTheme.BG_DARK}{NatureTheme.SUN}{'═'*70}{NatureTheme.RESET}")
+    print(f"{NatureTheme.SAGE}Ambiente: {env} • Data: {datetime.now().strftime('%d/%m/%Y')}{NatureTheme.RESET}")
+    print(f"{NatureTheme.MINT}Monitoramento suave que preserva seus logins!{NatureTheme.RESET}")
+    
+    # Pausa dramática
+    time.sleep(2)
+    
+    # Inicia menu
     main_menu()
 
+# ============================================
+# 🔧 EXECUÇÃO
+# ============================================
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n\n{NatureTheme.SUN}{NatureTheme.ICONS['flower']} Programa interrompido pelo usuário{NatureTheme.RESET}")
+    except Exception as e:
+        print(f"\n{NatureTheme.SUN}{NatureTheme.ICONS['bug']} Erro: {e}{NatureTheme.RESET}")
