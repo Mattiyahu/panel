@@ -17,18 +17,17 @@ from rich.align import Align
 from rich import print as rprint
 
 # --- CONFIGURAÇÕES DO SUNA ---
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 CONFIG_FILE = "suna_config.json"
 CHECK_INTERVAL = 3
-COOLDOWN_TIME = 60 # Tempo para estabilizar após abrir
+COOLDOWN_TIME = 60 
 
-# Limites dinâmicos (serão calibrados)
-MIN_RAM_MB = 150.0  # Mínimo de RAM para considerar o jogo aberto
-MIN_CPU_PERCENT = 2.0 # Mínimo de CPU para considerar ativo
+# Limites dinâmicos
+MIN_RAM_MB = 150.0  
+MIN_CPU_PERCENT = 2.0 
 
 console = Console()
 
-# --- ARTE ASCII SUNA ---
 SUNA_ART = """
 [bold yellow]
       \\   |   /
@@ -38,7 +37,7 @@ SUNA_ART = """
       /   |   \\     [dim]v{}[/dim]
 [/bold yellow]""".format(VERSION)
 
-# --- GERENCIAMENTO DE CONFIGURAÇÃO ---
+# --- SISTEMA DE CONFIGURAÇÃO (SEM VARIAVEIS GLOBAIS SOLTAS) ---
 def load_config():
     default = {"vip_link": "", "webhook_url": ""}
     if os.path.exists(CONFIG_FILE):
@@ -52,11 +51,10 @@ def save_config(data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-config = load_config()
-VIP_LINK = config.get("vip_link", "")
-WEBHOOK_URL = config.get("webhook_url", "")
+# Carregamos a config num dicionário acessível por todo o script
+CONF = load_config()
 
-# --- FUNÇÕES ADB OTIMIZADAS ---
+# --- FUNÇÕES ADB ---
 class ADB:
     @staticmethod
     def run(cmd):
@@ -66,29 +64,22 @@ class ADB:
 
     @staticmethod
     def get_device_info():
-        """Calibra baseando no hardware do dispositivo"""
         try:
             mem_info = ADB.run("cat /proc/meminfo")
-            total_mem = int(re.search(r"MemTotal:\s+(\d+)", mem_info).group(1)) / 1024 # MB
+            total_mem = int(re.search(r"MemTotal:\s+(\d+)", mem_info).group(1)) / 1024
             
-            # Ajuste de sensibilidade baseado na RAM total
             global MIN_RAM_MB
-            if total_mem > 6000: # Celular 6GB+
-                MIN_RAM_MB = 350.0
-            elif total_mem > 3000: # Celular 3GB+
-                MIN_RAM_MB = 250.0
-            else:
-                MIN_RAM_MB = 150.0
+            if total_mem > 6000: MIN_RAM_MB = 350.0
+            elif total_mem > 3000: MIN_RAM_MB = 250.0
+            else: MIN_RAM_MB = 150.0
                 
             return total_mem
         except:
-            return 2048.0 # Fallback 2GB
+            return 2048.0
 
     @staticmethod
     def get_focused_app():
-        """Verifica qual app está na tela sem usar uiautomator (rápido)"""
         try:
-            # Método compatível com Android 8-14
             dump = ADB.run("dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'")
             return dump
         except: return ""
@@ -108,7 +99,6 @@ class Instance:
         self.is_running = True
 
     def get_stats(self):
-        """Pega CPU e RAM usando top e processamento de texto"""
         self.pid = ADB.run(f"pidof {self.package}")
         
         if not self.pid:
@@ -118,10 +108,7 @@ class Instance:
             return
 
         try:
-            # Top otimizado: mostra threads, apenas do PID específico
             top_data = ADB.run(f"top -n 1 -b -p {self.pid}")
-            
-            # Regex para pegar CPU% e RAM (RES/RSS)
             lines = top_data.splitlines()
             for line in lines:
                 if str(self.pid) in line:
@@ -134,8 +121,6 @@ class Instance:
                     
                     if self.ram == 0.0 and len(parts) > 5:
                         try:
-                            # Tenta achar valores numéricos grandes que pareçam RAM (em K)
-                            # Normalmente RSS é a coluna 5 ou 6
                             val = int(parts[-4].replace("K", "")) / 1024
                             self.ram = val
                         except: pass
@@ -147,12 +132,10 @@ class Instance:
             self.status = "COOLDOWN"
             return
 
-        # 1. Checa se o processo morreu
         if not self.pid:
             self.relaunch("Processo morreu")
             return
 
-        # 2. Checa se está travado (0 CPU) ou em tela branca (baixa RAM)
         if self.ram < MIN_RAM_MB:
             self.error_streak += 1
             self.status = "LOW MEM"
@@ -163,16 +146,13 @@ class Instance:
             self.error_streak = 0
             self.status = "RUNNING"
 
-        # 3. Checa se está em Background (Home)
         if self.error_streak > 2:
             focused = ADB.get_focused_app()
-            # Se não estiver focado e não for o Launcher (Home), pode ser anúncio ou crash
             if self.package not in focused and "Launcher" in focused:
                  self.relaunch("App em Background")
                  return
 
-        # Ação baseada em streak de erros
-        if self.error_streak >= 10: # ~30 segundos com problema
+        if self.error_streak >= 12: 
             self.relaunch("Crash/Lag Detectado")
 
     def relaunch(self, reason):
@@ -182,8 +162,13 @@ class Instance:
         
         ADB.run(f"am force-stop {self.package}")
         time.sleep(1)
-        # Abre direto no link VIP
-        ADB.run(f"am start -a android.intent.action.VIEW -d '{VIP_LINK}' {self.package}")
+        
+        # AQUI: Usa o dicionário CONF diretamente
+        link = CONF.get("vip_link", "")
+        if link:
+            ADB.run(f"am start -a android.intent.action.VIEW -d '{link}' {self.package}")
+        else:
+            ADB.run(f"monkey -p {self.package} -c android.intent.category.LAUNCHER 1")
         
         self.cooldown_until = time.time() + COOLDOWN_TIME
         self.error_streak = 0
@@ -195,7 +180,7 @@ class Instance:
             self.check_health()
             time.sleep(CHECK_INTERVAL)
 
-# --- GERENCIADOR PRINCIPAL ---
+# --- GERENCIADOR ---
 class SunaManager:
     def __init__(self):
         self.instances = {}
@@ -209,16 +194,16 @@ class SunaManager:
         if len(self.logs) > 6: self.logs.pop(0)
 
     def webhook(self, content):
-        if not WEBHOOK_URL: return
-        try: requests.post(WEBHOOK_URL, json={"content": content}, timeout=2)
+        url = CONF.get("webhook_url", "")
+        if not url: return
+        try: requests.post(url, json={"content": content}, timeout=2)
         except: pass
 
     def auto_setup(self):
         rprint("[bold yellow]☀️ Calibrando dispositivo...[/bold yellow]")
         self.device_ram = ADB.get_device_info()
         rprint(f"[cyan]ℹ️ RAM Total Detectada: {self.device_ram:.0f} MB[/cyan]")
-        rprint(f"[cyan]ℹ️ Trigger de Crash: < {MIN_RAM_MB} MB RAM[/cyan]")
-        time.sleep(2)
+        time.sleep(1)
 
         raw = ADB.run("pm list packages roblox")
         pkgs = [l.replace("package:", "").strip() for l in raw.splitlines() if "roblox" in l]
@@ -254,10 +239,10 @@ class SunaManager:
                 while self.running:
                     table = Table(expand=True, border_style="yellow", header_style="bold yellow")
                     table.add_column("CLONE", style="bold white")
-                    table.add_column("RAM (MB)", justify="right")
-                    table.add_column("CPU (%)", justify="right")
+                    table.add_column("RAM", justify="right")
+                    table.add_column("CPU", justify="right")
                     table.add_column("STATUS", justify="center")
-                    table.add_column("ULT. AÇÃO")
+                    table.add_column("AÇÃO")
 
                     for p, inst in self.instances.items():
                         if inst.status == "RUNNING": s_style = "bold green"
@@ -268,13 +253,13 @@ class SunaManager:
                         name = p.split('.')[-1].upper()
                         table.add_row(
                             name,
-                            f"{inst.ram:.1f}",
+                            f"{inst.ram:.1f}MB",
                             f"{inst.cpu:.1f}%",
                             f"[{s_style}]{inst.status}[/{s_style}]",
                             inst.last_action
                         )
 
-                    layout["body"].update(Panel(table, title=f"[bold yellow]MONITORAMENTO (Total RAM: {self.device_ram:.0f}MB)[/bold yellow]", border_style="yellow"))
+                    layout["body"].update(Panel(table, title=f"[bold yellow]MONITORAMENTO ({self.device_ram:.0f}MB Total)[/bold yellow]", border_style="yellow"))
                     
                     log_text = "\n".join(self.logs)
                     layout["footer"].update(Panel(log_text, title="LOGS", border_style="white"))
@@ -286,13 +271,16 @@ class SunaManager:
 # --- MENU ---
 import datetime
 def main():
-    # CORREÇÃO AQUI: As variáveis globais devem ser declaradas no início da função
-    global VIP_LINK, WEBHOOK_URL
-    
+    # NÃO PRECISA MAIS DE GLOBAL
     while True:
         console.clear()
         rprint(Align.center(SUNA_ART))
-        rprint(Panel(f"[yellow]VIP:[/yellow] {VIP_LINK[:30]}...\n[yellow]WEBHOOK:[/yellow] {'Ativo' if WEBHOOK_URL else 'Off'}", border_style="yellow"))
+        
+        # Acessamos direto do dicionário CONF
+        v_link = CONF.get("vip_link", "")
+        w_url = CONF.get("webhook_url", "")
+        
+        rprint(Panel(f"[yellow]VIP:[/yellow] {v_link[:30]}...\n[yellow]WEBHOOK:[/yellow] {'Ativo' if w_url else 'Off'}", border_style="yellow"))
         
         rprint("[1] ☀️ INICIAR SUNA HUB")
         rprint("[2] ⚙️ CONFIGURAR")
@@ -302,7 +290,7 @@ def main():
         opt = Prompt.ask("\n[bold yellow]Escolha[/bold yellow]", choices=["1", "2", "3", "0"])
         
         if opt == "1":
-            if not VIP_LINK:
+            if not CONF.get("vip_link"):
                 rprint("[red]Configure o Link VIP primeiro![/red]")
                 time.sleep(2)
             else:
@@ -310,9 +298,13 @@ def main():
                 mgr.start()
         
         elif opt == "2":
-            VIP_LINK = Prompt.ask("Link do Servidor VIP", default=VIP_LINK)
-            WEBHOOK_URL = Prompt.ask("Webhook Discord (Opcional)", default=WEBHOOK_URL)
-            save_config({"vip_link": VIP_LINK, "webhook_url": WEBHOOK_URL})
+            # Atualizamos o dicionário CONF diretamente
+            new_vip = Prompt.ask("Link do Servidor VIP", default=CONF.get("vip_link", ""))
+            new_web = Prompt.ask("Webhook Discord (Opcional)", default=CONF.get("webhook_url", ""))
+            
+            CONF["vip_link"] = new_vip
+            CONF["webhook_url"] = new_web
+            save_config(CONF)
             
         elif opt == "3":
              rprint("\n[bold yellow]-- FERRAMENTAS --[/bold yellow]")
