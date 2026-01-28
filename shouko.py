@@ -1772,7 +1772,7 @@ class RobloxManager:
 
         try:
 
-            cmd = "pm list packages
+            cmd = "pm list packages"
 
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
