@@ -20,15 +20,12 @@ from rich.console import Console
 from datetime import datetime, timezone
 from threading import Lock, Event
 # =========================
-# ANDROID / TERMUX AUTOSETUP
+# TERMUX / ANDROID SAFE MODE
 # =========================
 
-import platform
-import subprocess
-import time
-import os
+import os, time, platform, subprocess
 
-IS_ANDROID = "android" in platform.platform().lower() or os.path.exists("/data/data/com.termux")
+IS_ANDROID = os.path.exists("/data/data/com.termux")
 
 def _safe_cmd(cmd):
     try:
@@ -36,44 +33,46 @@ def _safe_cmd(cmd):
     except Exception:
         return None
 
-# Fallback boot time
-try:
-    import psutil
-    try:
-        
-    except Exception:
-        SYSTEM_BOOT_TIME = time.time()
-except Exception:
-    psutil = None
-    SYSTEM_BOOT_TIME = time.time()
+# Nunca use psutil boot_time no Android
+SYSTEM_BOOT_TIME = time.time()
 
-def android_uptime():
-    out = _safe_cmd("uptime -s")
-    if out:
-        try:
-            return time.time() - time.mktime(time.strptime(out, "%Y-%m-%d %H:%M:%S"))
-        except Exception:
-            pass
+def safe_uptime():
+    if IS_ANDROID:
+        out = _safe_cmd("uptime -s")
+        if out:
+            try:
+                return time.time() - time.mktime(time.strptime(out, "%Y-%m-%d %H:%M:%S"))
+            except:
+                pass
     return time.time() - SYSTEM_BOOT_TIME
 
-def android_cpu_percent():
-    out = _safe_cmd("dumpsys cpuinfo | head -n 1")
-    if out and "%user" in out:
-        try:
-            return float(out.split("%")[0].strip())
-        except Exception:
-            pass
-    return 0.0
+def safe_cpu():
+    if IS_ANDROID:
+        out = _safe_cmd("dumpsys cpuinfo | head -n 1")
+        if out and "%" in out:
+            try:
+                return float(out.split("%")[0].strip())
+            except:
+                pass
+        return 0.0
+    return psutil.cpu_percent(interval=None) if psutil else 0.0
 
-def android_memory():
-    out = _safe_cmd("dumpsys meminfo | grep 'Total RAM'")
-    if out:
-        try:
-            total = float(out.split(":")[1].split("K")[0].strip()) / 1024
-            return total, total * 0.5, 50.0
-        except Exception:
-            pass
+def safe_memory():
+    if IS_ANDROID:
+        out = _safe_cmd("dumpsys meminfo | grep 'Total RAM'")
+        if out:
+            try:
+                total = float(out.split(":")[1].split("K")[0]) / 1024
+                used = total * 0.5
+                return total, used, 50.0
+            except:
+                pass
+        return 0, 0, 0
+    if psutil:
+        mem = psutil.virtual_memory()
+        return mem.total / (1024**3), mem.used / (1024**3), mem.percent
     return 0, 0, 0
+
 
 status_lock = Lock()
 rejoin_lock = Lock()
@@ -424,7 +423,7 @@ class SystemMonitor:
 
     @staticmethod
     def get_uptime():
-        seconds = android_uptime() if IS_ANDROID else time.time() - SYSTEM_BOOT_TIME
+        seconds = safe_uptime()
         d = int(seconds // 86400)
         h = int((seconds % 86400) // 3600)
         m = int((seconds % 3600) // 60)
@@ -442,15 +441,9 @@ class SystemMonitor:
 
     @staticmethod
     def get_system_info():
-        if IS_ANDROID:
-            cpu = android_cpu_percent()
-            total, used, percent = android_memory()
-        else:
-            cpu = psutil.cpu_percent(interval=1) if psutil else 0
-            mem = psutil.virtual_memory() if psutil else None
-            total = round(mem.total / (1024**3), 2) if mem else 0
-            used = round(mem.used / (1024**3), 2) if mem else 0
-            percent = mem.percent if mem else 0
+        cpu = safe_cpu()
+total, used, percent = safe_memory()
+
 
         return {
             "cpu_usage": cpu,
@@ -542,9 +535,9 @@ class UIManager:
             return
         
         UIManager.last_update_time = current_time
-        cpu_usage = psutil.cpu_percent(interval=None)
-        memory_info = psutil.virtual_memory()
-        ram = round(memory_info.used / memory_info.total * 100, 2)
+        cpu_usage = safe_cpu()
+        _, _, ram = safe_memory()
+        ram = round(ram, 2)
         title = f"CPU: {cpu_usage}% | RAM: {ram}%"
 
         table_packages = PrettyTable(
