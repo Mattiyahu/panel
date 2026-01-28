@@ -1,3 +1,11 @@
+#!/data/data/com.termux/files/usr/bin/python
+# -*- coding: utf-8 -*-
+"""
+Shouko Bot v1.0.4 - Android Clean Edition
+Roblox Multi-Account Manager
+Optimized for Termux/Android - NO psutil dependency
+"""
+
 from prettytable import PrettyTable
 import threading
 import time
@@ -8,7 +16,6 @@ import sqlite3
 import shutil
 import traceback
 import random
-import psutil
 import gc
 import os
 from rich.table import Table
@@ -19,24 +26,24 @@ from rich.box import ROUNDED
 from rich.console import Console
 from datetime import datetime, timezone
 from threading import Lock, Event
-# =========================
-# TERMUX / ANDROID SAFE MODE
-# =========================
 
-import os, time, platform, subprocess
+# =========================
+# ANDROID CLEAN MODE (NO /proc, NO psutil)
+# =========================
 
 IS_ANDROID = os.path.exists("/data/data/com.termux")
 
 def _safe_cmd(cmd):
+    """Execute command safely and return output"""
     try:
-        return subprocess.check_output(cmd, shell=True, text=True).strip()
+        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
     except Exception:
         return None
 
-# Nunca use psutil boot_time no Android
 SYSTEM_BOOT_TIME = time.time()
 
 def safe_uptime():
+    """Get system uptime in seconds"""
     if IS_ANDROID:
         out = _safe_cmd("uptime -s")
         if out:
@@ -47,6 +54,7 @@ def safe_uptime():
     return time.time() - SYSTEM_BOOT_TIME
 
 def safe_cpu():
+    """Get CPU usage percentage"""
     if IS_ANDROID:
         out = _safe_cmd("dumpsys cpuinfo | head -n 1")
         if out and "%" in out:
@@ -54,25 +62,48 @@ def safe_cpu():
                 return float(out.split("%")[0].strip())
             except:
                 pass
-        return 0.0
-    return psutil.cpu_percent(interval=None) if psutil else 0.0
+    return 0.0
 
 def safe_memory():
+    """Get memory info (total, used, percent)"""
     if IS_ANDROID:
         out = _safe_cmd("dumpsys meminfo | grep 'Total RAM'")
         if out:
             try:
-                total = float(out.split(":")[1].split("K")[0]) / 1024
-                used = total * 0.5
-                return total, used, 50.0
+                total = float(out.split(":")[1].split("K")[0].strip()) / (1024 * 1024)  # GB
+                used = total * 0.5  # Estimate
+                percent = 50.0
+                return total, used, percent
             except:
                 pass
-        return 0, 0, 0
-    if psutil:
-        mem = psutil.virtual_memory()
-        return mem.total / (1024**3), mem.used / (1024**3), mem.percent
-    return 0, 0, 0
+    return 0.0, 0.0, 0.0
 
+def safe_kill_pid(pid):
+    """Kill process by PID safely"""
+    try:
+        subprocess.run(
+            ["kill", "-9", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2
+        )
+        return True
+    except:
+        return False
+
+def get_pids_for_package(package_name):
+    """Get all PIDs for a package"""
+    try:
+        result = _safe_cmd(f"pidof {package_name}")
+        if result:
+            return [int(pid) for pid in result.split()]
+    except:
+        pass
+    return []
+
+# =========================
+# GLOBAL VARIABLES
+# =========================
 
 status_lock = Lock()
 rejoin_lock = Lock()
@@ -86,8 +117,6 @@ device_name = None
 webhook_interval = None
 reset_tab_interval = None
 close_and_rejoin_delay = None
-
-
 
 auto_android_id_enabled = False
 auto_android_id_thread = None
@@ -115,11 +144,16 @@ globals()["executors"] = executors
 
 if not os.path.exists("Shouko.dev"):
     os.makedirs("Shouko.dev", exist_ok=True)
+    
 SERVER_LINKS_FILE = "Shouko.dev/server-links.txt"
 ACCOUNTS_FILE = "Shouko.dev/accounts.txt"
 CONFIG_FILE = "Shouko.dev/config.json"
 
-version = "1.0.3 | Created By Neyoshi And Improved By Nexus/Gemini"
+version = "1.0.4 - Android Clean | Created By Neyoshi And Improved By Nexus/Gemini"
+
+# =========================
+# UTILITY CLASSES
+# =========================
 
 class Utilities:
     @staticmethod
@@ -133,7 +167,7 @@ class Utilities:
 
     @staticmethod
     def clear_screen():
-        os.system('cls' if os.name == 'nt' else 'clear')
+        os.system('clear')
 
 class FileManager:
     SERVER_LINKS_FILE = "Shouko.dev/server-link.txt"
@@ -418,7 +452,7 @@ class SystemMonitor:
         try:
             os.system(f"/system/bin/screencap -p {path}")
             return path if os.path.exists(path) else None
-        except Exception:
+        except:
             return None
 
     @staticmethod
@@ -432,18 +466,13 @@ class SystemMonitor:
 
     @staticmethod
     def get_memory_usage():
-        if IS_ANDROID:
-            _, used, _ = android_memory()
-            return round(used, 2)
-        if psutil:
-            return round(psutil.Process(os.getpid()).memory_info().rss / (1024**2), 2)
-        return 0
+        _, used, _ = safe_memory()
+        return round(used, 2)
 
     @staticmethod
     def get_system_info():
         cpu = safe_cpu()
-total, used, percent = safe_memory()
-
+        total, used, percent = safe_memory()
 
         return {
             "cpu_usage": cpu,
@@ -459,6 +488,10 @@ total, used, percent = safe_memory()
         result = _safe_cmd("ps -A | grep roblox")
         return result.splitlines() if result else []
 
+    @staticmethod
+    def get_pids_for_package(package_name):
+        """Get PIDs for a specific package"""
+        return get_pids_for_package(package_name)
 
 class UIManager:
     @staticmethod
@@ -468,7 +501,7 @@ class UIManager:
       _                   _                 
   ___ | |__    ___   _ __ | | _____    __| | _____   __
  / __| '_ \ / _ \| | | | |/ / _ \ / _` |/ _ \ \ / /
- \__ \ | | | (_) | |_| |   < (_) | (_| |    __/\ V / 
+ \__ \ | | | (_) | |_| |   < (_) | (_| |  __/\ V / 
  |___/_| |_|\___/ \__,_|_|_|\___(_)__,_|\___| \_/  
         """, style="bold yellow")
 
@@ -720,7 +753,7 @@ class RobloxManager:
             )
             # Collect PIDs
             try:
-                pids = SystemMonitor.get_pids_for_package(package_name)
+                pids = get_pids_for_package(package_name)
                 if pids:
                     all_pids_to_kill.update(pids)
             except Exception as e:
@@ -733,13 +766,7 @@ class RobloxManager:
         if all_pids_to_kill:
             print(f"\033[1;93m[ Shouko.dev ] - Stage 2: Found {len(all_pids_to_kill)} lingering PIDs. Sending SIGKILL...\033[0m")
             for pid in all_pids_to_kill:
-                try:
-                    proc = psutil.Process(pid)
-                    proc.kill()
-                except psutil.NoSuchProcess:
-                    pass # Already dead
-                except Exception as e:
-                    print(f"\033[1;31m[ Shouko.dev ] - Failed to kill PID {pid}: {e}\033[0m")
+                safe_kill_pid(pid)
         else:
             print("\033[1;32m[ Shouko.dev ] - Stage 2: No lingering PIDs found. 'am force-stop' was successful.\033[0m")
 
@@ -755,17 +782,11 @@ class RobloxManager:
             )
             time.sleep(0.25) 
 
-            pids = SystemMonitor.get_pids_for_package(package_name)
+            pids = get_pids_for_package(package_name)
             if pids:
                 print(f"\033[1;93m[ Shouko.dev ] - Found lingering PIDs for {package_name}: {pids}. Sending SIGKILL...\033[0m")
                 for pid in pids:
-                    try:
-                        proc = psutil.Process(pid)
-                        proc.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-                    except Exception as e:
-                        print(f"\033[1;31m[ Shouko.dev ] - Failed to kill PID {pid}: {e}\033[0m")
+                    safe_kill_pid(pid)
             else:
                 print(f"\033[1;32m[ Shouko.dev ] - No lingering PIDs found for {package_name}.\033[0m")
             
@@ -775,7 +796,6 @@ class RobloxManager:
         except Exception as e:
             print(f"\033[1;31m[ Shouko.dev ] - Error during kill process for {package_name}: {e}\033[0m")
             Utilities.log_error(f"Error in kill_roblox_process for {package_name}: {e}\n{traceback.format_exc()}")
-
 
     @staticmethod
     def delete_cache_for_package(package_name):
@@ -1618,9 +1638,9 @@ def main():
 
                 print("\033[93m[ Shouko.dev ] - Select game:\033[0m")
                 games = [
-                    "1. Blox Fruits", "2. Grow A Garden", "3. King Legacy", "4. Fisch",
-                    "5. Bee Swarm Simulator", "6. Anime Last Stand", "7. Dead Rails Alpha",
-                    "8. All Star Tower Defense X", "9. 99 Nights In The Forest", "10. Murder Mystery 2",
+                    "1. Blox Fruits", "2. Pet Simulator 99", "3. Anime Defenders", "4. Fisch",
+                    "5. Brookhaven", "6. Sols RNG", "7. Type Soul",
+                    "8. Jujutsu Infinite", "9. Cursed Arena", "10. Dragon Adventures",
                     "11. Steal A Brainrot", "12. Blue Lock Rivals", "13. Arise Crossover", "14. Other game or Private Server Link"
                 ]
                 for game in games:
