@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 🖥️ Roblox AutoRejoin - Hacker Theme 🖥️
-Interface cyberpunk com login automático para clones Roblox
+Interface cyberpunk para monitoramento de clones Roblox
 Versão: 4.0 - Hacker Edition
 """
 
@@ -12,18 +12,13 @@ import json
 import signal
 import subprocess
 import platform
-import getpass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import base64
-import hashlib
-from cryptography.fernet import Fernet
 
 # ============================================
-# 🎮 CONFIGURAÇÃO SEGURA
+# 🎮 CONFIGURAÇÃO
 # ============================================
 CONFIG_FILE = "hacker_config.json"
-KEY_FILE = "hacker_key.key"
 DEFAULT_CONFIG = {
     "web_link": "https://www.roblox.com/games/1537690962/Bee-Swarm-Simulator?privateServerLinkCode=05888256464342538313491710978310",
     "webhook_url": "",
@@ -31,8 +26,7 @@ DEFAULT_CONFIG = {
     "low_cpu_threshold": 8.0,
     "max_lowcpu_time": 10,
     "cooldown_time": 10,
-    "packages": [],
-    "credentials": {}  # {package: {"user": "encrypted", "pass": "encrypted"}}
+    "packages": []
 }
 
 # ============================================
@@ -137,44 +131,6 @@ class HackerTheme:
             print(char, end='', flush=True)
             time.sleep(delay)
         print()
-
-# ============================================
-# 🔐 SISTEMA DE CRIPTOGRAFIA
-# ============================================
-class CryptoSystem:
-    """Sistema de criptografia para credenciais"""
-    
-    @staticmethod
-    def get_or_create_key():
-        """Obtém ou cria chave de criptografia"""
-        if os.path.exists(KEY_FILE):
-            with open(KEY_FILE, 'rb') as f:
-                return f.read()
-        else:
-            key = Fernet.generate_key()
-            with open(KEY_FILE, 'wb') as f:
-                f.write(key)
-            return key
-    
-    @staticmethod
-    def encrypt(text: str) -> str:
-        """Criptografa texto"""
-        key = CryptoSystem.get_or_create_key()
-        cipher = Fernet(key)
-        encrypted = cipher.encrypt(text.encode())
-        return base64.urlsafe_b64encode(encrypted).decode()
-    
-    @staticmethod
-    def decrypt(encrypted_text: str) -> str:
-        """Descriptografa texto"""
-        try:
-            key = CryptoSystem.get_or_create_key()
-            cipher = Fernet(key)
-            decoded = base64.urlsafe_b64decode(encrypted_text.encode())
-            decrypted = cipher.decrypt(decoded)
-            return decrypted.decode()
-        except:
-            return ""
 
 # ============================================
 # 🎨 INTERFACE HACKER
@@ -298,123 +254,6 @@ class HackerUI:
         print(f"{HackerTheme.GREEN_DARK}└{'─'*60}┘{HackerTheme.RESET}")
 
 # ============================================
-# 🔐 SISTEMA DE LOGIN AUTOMÁTICO
-# ============================================
-class RobloxAutoLogin:
-    """Sistema de login automático para Roblox"""
-    
-    def __init__(self, config: dict):
-        self.config = config
-        self.login_cooldown: Dict[str, float] = {}
-    
-    def save_credentials(self, package: str, username: str, password: str):
-        """Salva credenciais criptografadas"""
-        if "credentials" not in self.config:
-            self.config["credentials"] = {}
-        
-        self.config["credentials"][package] = {
-            "user": CryptoSystem.encrypt(username),
-            "pass": CryptoSystem.encrypt(password)
-        }
-    
-    def get_credentials(self, package: str) -> Tuple[str, str]:
-        """Obtém credenciais descriptografadas"""
-        if package in self.config.get("credentials", {}):
-            creds = self.config["credentials"][package]
-            user = CryptoSystem.decrypt(creds["user"])
-            password = CryptoSystem.decrypt(creds["pass"])
-            return user, password
-        return "", ""
-    
-    def clear_credentials(self, package: str):
-        """Remove credenciais salvas"""
-        if package in self.config.get("credentials", {}):
-            del self.config["credentials"][package]
-    
-    def perform_login(self, package: str) -> bool:
-        """
-        Executa login automático no Roblox.
-        AVISO: Este método é experimental e pode não funcionar em todos os dispositivos.
-        """
-        current_time = time.time()
-        
-        # Verifica cooldown
-        if package in self.login_cooldown and current_time < self.login_cooldown[package]:
-            HackerUI.print_log_entry(package, "Login em cooldown", "WARN")
-            return False
-        
-        # Obtém credenciais
-        username, password = self.get_credentials(package)
-        if not username or not password:
-            HackerUI.print_log_entry(package, "Credenciais não configuradas", "ERROR")
-            return False
-        
-        HackerUI.print_log_entry(package, "Iniciando login automático...", "INFO")
-        
-        try:
-            # 1. Garante que o app está fechado
-            subprocess.run(["adb", "shell", "am", "force-stop", package], 
-                         capture_output=True, timeout=5)
-            time.sleep(2)
-            
-            # 2. Abre o Roblox
-            subprocess.run(["adb", "shell", "monkey", "-p", package, "1"], 
-                         capture_output=True, timeout=5)
-            time.sleep(5)
-            
-            # 3. Aguarda carregamento
-            HackerUI.animate_loading("Aguardando carregamento...", 3)
-            
-            # 4. Método 1: Tenta tocar na área de login (coordenadas podem variar)
-            # Esta parte requer ajustes específicos para seu dispositivo
-            
-            # 5. Método alternativo: Usa input text para inserir credenciais
-            # Nota: Requer que o campo já esteja em foco
-            
-            # 6. Define cooldown
-            self.login_cooldown[package] = time.time() + 300  # 5 minutos
-            
-            HackerUI.print_log_entry(package, "Tentativa de login concluída", "INFO")
-            return True
-            
-        except Exception as e:
-            HackerUI.print_log_entry(package, f"Erro no login: {str(e)}", "ERROR")
-            return False
-    
-    def setup_login_wizard(self, package: str):
-        """Assistente para configurar login"""
-        HackerUI.print_header(f"CONFIGURAR LOGIN", f"Pacote: {package}")
-        
-        print(f"{HackerTheme.WARNING}⚠️  AVISO IMPORTANTE:{HackerTheme.RESET}")
-        print(f"{HackerTheme.TERMINAL}• Credenciais são criptografadas localmente")
-        print(f"• Login automático pode não funcionar em todos os dispositivos")
-        print(f"• Recomendado apenas para contas secundárias")
-        print(f"• Nunca compartilhe seu arquivo {KEY_FILE}{HackerTheme.RESET}\n")
-        
-        current_user, current_pass = self.get_credentials(package)
-        if current_user:
-            print(f"{HackerTheme.INFO}Credenciais atuais: {HackerTheme.CYAN}{current_user}{HackerTheme.RESET}")
-            if input(f"\n{HackerTheme.TERMINAL}Redefinir? (s/n): {HackerTheme.RESET}").lower() != 's':
-                return
-        
-        print(f"\n{HackerTheme.GREEN_DARK}┌─[{HackerTheme.CYAN}CREDENCIAIS{HackerTheme.GREEN_DARK}]─{'─'*50}┐{HackerTheme.RESET}")
-        
-        username = input(f"{HackerTheme.GREEN_DARK}│ {HackerTheme.TERMINAL}Usuário Roblox: {HackerTheme.RESET}").strip()
-        password = getpass.getpass(f"{HackerTheme.GREEN_DARK}│ {HackerTheme.TERMINAL}Senha: {HackerTheme.RESET}")
-        
-        if username and password:
-            self.save_credentials(package, username, password)
-            HackerUI.print_log_entry(package, "Credenciais salvas com segurança", "SUCCESS")
-            
-            # Teste opcional
-            if input(f"\n{HackerTheme.TERMINAL}Testar login agora? (s/n): {HackerTheme.RESET}").lower() == 's':
-                self.perform_login(package)
-        else:
-            HackerUI.print_log_entry(package, "Credenciais não fornecidas", "WARN")
-        
-        print(f"{HackerTheme.GREEN_DARK}└{'─'*60}┘{HackerTheme.RESET}")
-
-# ============================================
 # 🎮 MONITOR HACKER
 # ============================================
 class HackerMonitor:
@@ -427,7 +266,6 @@ class HackerMonitor:
         self.cooldown: Dict[str, float] = {}
         self.max_count = config["max_lowcpu_time"] // config["check_interval"]
         self.running = True
-        self.login_system = RobloxAutoLogin(config)
         
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -470,8 +308,7 @@ class HackerMonitor:
             "pid": pid,
             "running": pid is not None,
             "cpu": 0.0,
-            "needs_restart": False,
-            "needs_login": False
+            "needs_restart": False
         }
         
         if pid:
@@ -482,18 +319,13 @@ class HackerMonitor:
                 self.lowcpu_count[package] = self.lowcpu_count.get(package, 0) + 1
                 if self.lowcpu_count[package] >= self.max_count:
                     status["needs_restart"] = True
-                    
-                    # Verifica se tem credenciais salvas
-                    user, passw = self.login_system.get_credentials(package)
-                    if user and passw:
-                        status["needs_login"] = True
             else:
                 self.lowcpu_count[package] = 0
         
         return status
     
-    def soft_restart(self, package: str, attempt_login: bool = True) -> bool:
-        """Reinício suave com opção de login"""
+    def soft_restart(self, package: str) -> bool:
+        """Reinício suave do pacote"""
         current_time = time.time()
         
         # Verifica cooldown
@@ -508,20 +340,8 @@ class HackerMonitor:
             self.run_adb_command(f"shell am force-stop {package}")
             time.sleep(2)
             
-            # 2. Tenta login automático se configurado
-            if attempt_login:
-                user, passw = self.login_system.get_credentials(package)
-                if user and passw:
-                    HackerUI.print_log_entry(package, "Tentando login automático...", "INFO")
-                    if self.login_system.perform_login(package):
-                        time.sleep(5)
-                    else:
-                        # Fallback para abrir VIP normalmente
-                        self.open_vip(package)
-                else:
-                    self.open_vip(package)
-            else:
-                self.open_vip(package)
+            # 2. Abre servidor VIP
+            self.open_vip(package)
             
             # 3. Verifica resultado
             pid_after = self.get_pid(package)
@@ -561,7 +381,6 @@ class HackerMonitor:
 │ {HackerTheme.TERMINAL}• Intervalo:     {HackerTheme.CYAN}{self.config['check_interval']}s
 │ {HackerTheme.TERMINAL}• Cooldown:      {HackerTheme.CYAN}{self.config['cooldown_time']}s
 │ {HackerTheme.TERMINAL}• Pacotes:       {HackerTheme.CYAN}{len(self.config['packages'])}
-│ {HackerTheme.TERMINAL}• Logins config: {HackerTheme.CYAN}{len(self.config.get('credentials', {}))}
 {HackerTheme.GREEN_DARK}└{'─'*60}┘{HackerTheme.RESET}
         """
         print(config_info)
@@ -569,7 +388,7 @@ class HackerMonitor:
         # Inicialização
         HackerUI.animate_loading("Inicializando pacotes", 2)
         for package in self.config["packages"]:
-            self.soft_restart(package, attempt_login=False)
+            self.soft_restart(package)
             time.sleep(3)
         
         # Loop de monitoramento
@@ -594,7 +413,7 @@ class HackerMonitor:
                     HackerUI.print_log_entry(package, 
                         f"CPU CRÍTICA: {cpu_color}{status['cpu']:.1f}%{HackerTheme.TERMINAL} • REINICIANDO...", 
                         "WARN")
-                    self.soft_restart(package, attempt_login=status["needs_login"])
+                    self.soft_restart(package)
                     
                 elif status["cpu"] <= self.config["low_cpu_threshold"]:
                     count = self.lowcpu_count.get(package, 0)
@@ -697,7 +516,6 @@ def main_menu():
         status_box = f"""
 {HackerTheme.GREEN_DARK}┌─[{HackerTheme.CYAN}STATUS DO SISTEMA{HackerTheme.GREEN_DARK}]─{'─'*40}┐
 │ {HackerTheme.TERMINAL}• Pacotes monitorados: {HackerTheme.CYAN}{len(config.get('packages', []))}
-│ {HackerTheme.TERMINAL}• Logins configurados: {HackerTheme.CYAN}{len(config.get('credentials', {}))}
 │ {HackerTheme.TERMINAL}• CPU Limite:         {HackerTheme.CYAN}{config['low_cpu_threshold']}%
 │ {HackerTheme.TERMINAL}• Intervalo:          {HackerTheme.CYAN}{config['check_interval']}s
 │ {HackerTheme.TERMINAL}• Última atualização: {HackerTheme.CYAN}{datetime.now().strftime('%H:%M:%S')}
@@ -710,8 +528,7 @@ def main_menu():
             {"icon": "🖥️", "text": "Iniciar Monitoramento", "color": HackerTheme.CYAN},
             {"icon": "🔧", "text": "Configurar Sistema", "color": HackerTheme.GREEN_NEON},
             {"icon": "🔍", "text": "Detectar Pacotes", "color": HackerTheme.BLUE},
-            {"icon": "🔐", "text": "Gerenciar Logins", "color": HackerTheme.PURPLE},
-            {"icon": "🚀", "text": "Testar Conexão ADB", "color": HackerTheme.ORANGE},
+            {"icon": "�", "text": "Testar Conexão ADB", "color": HackerTheme.ORANGE},
             {"icon": "📊", "text": "Ver Logs do Sistema", "color": HackerTheme.PINK},
             {"icon": "⚡", "text": "Executar Todos", "color": HackerTheme.YELLOW},
             {"icon": "⏹️", "text": "Sair do Sistema", "color": HackerTheme.RED}
@@ -720,7 +537,7 @@ def main_menu():
         HackerUI.print_menu(menu_options)
         
         try:
-            choice = input(f"\n{HackerTheme.CYAN}{HackerTheme.SYMBOLS['terminal']} {HackerTheme.BOLD}ESCOLHA UMA OPÇÃO (1-8): {HackerTheme.RESET}").strip()
+            choice = input(f"\n{HackerTheme.CYAN}{HackerTheme.SYMBOLS['terminal']} {HackerTheme.BOLD}ESCOLHA UMA OPÇÃO (1-7): {HackerTheme.RESET}").strip()
             
             if choice == "1":
                 # Iniciar monitoramento
@@ -757,35 +574,6 @@ def main_menu():
                 input(f"\n{HackerTheme.TERMINAL}Pressione Enter...{HackerTheme.RESET}")
                 
             elif choice == "4":
-                # Gerenciar logins
-                HackerUI.print_header("GERENCIAMENTO DE LOGINS")
-                
-                if not config.get("packages"):
-                    HackerUI.print_log_entry("LOGIN", "Detecte pacotes primeiro", "WARN")
-                    input(f"\n{HackerTheme.TERMINAL}Pressione Enter...{HackerTheme.RESET}")
-                    continue
-                
-                print(f"\n{HackerTheme.GREEN_DARK}┌─[{HackerTheme.CYAN}PACOTES DISPONÍVEIS{HackerTheme.GREEN_DARK}]─{'─'*35}┐{HackerTheme.RESET}")
-                for i, package in enumerate(config["packages"], 1):
-                    user, _ = RobloxAutoLogin(config).get_credentials(package)
-                    status = f"{HackerTheme.GREEN_NEON}✓" if user else f"{HackerTheme.RED}✗"
-                    print(f"{HackerTheme.GREEN_DARK}│ {HackerTheme.CYAN}{i:2d}{HackerTheme.GREEN_DARK} • "
-                          f"{HackerTheme.TERMINAL}{package:<30} {status}{HackerTheme.RESET}")
-                print(f"{HackerTheme.GREEN_DARK}└{'─'*60}┘{HackerTheme.RESET}")
-                
-                try:
-                    pkg_choice = int(input(f"\n{HackerTheme.TERMINAL}Selecione pacote (1-{len(config['packages'])}): {HackerTheme.RESET}"))
-                    if 1 <= pkg_choice <= len(config["packages"]):
-                        package = config["packages"][pkg_choice-1]
-                        login_system = RobloxAutoLogin(config)
-                        login_system.setup_login_wizard(package)
-                        save_config(config)
-                except:
-                    HackerUI.print_log_entry("INPUT", "Seleção inválida", "ERROR")
-                
-                input(f"\n{HackerTheme.TERMINAL}Pressione Enter...{HackerTheme.RESET}")
-                
-            elif choice == "5":
                 # Testar conexão ADB
                 HackerUI.print_header("TESTE DE CONEXÃO")
                 monitor = HackerMonitor(config)
@@ -806,7 +594,7 @@ def main_menu():
                 
                 input(f"\n{HackerTheme.TERMINAL}Pressione Enter...{HackerTheme.RESET}")
                 
-            elif choice == "6":
+            elif choice == "5":
                 # Ver logs
                 HackerUI.print_header("LOGS DO SISTEMA")
                 HackerUI.print_terminal_box("""
@@ -818,13 +606,12 @@ def main_menu():
                 """, "LOGS RECENTES")
                 input(f"\n{HackerTheme.TERMINAL}Pressione Enter...{HackerTheme.RESET}")
                 
-            elif choice == "7":
+            elif choice == "6":
                 # Executar todos
                 HackerUI.print_header("EXECUÇÃO COMPLETA")
                 print(f"{HackerTheme.WARNING}⚠️  Esta opção executará todas as tarefas automaticamente:{HackerTheme.RESET}")
                 print(f"{HackerTheme.TERMINAL}1. Detectar pacotes")
-                print(f"2. Configurar logins (se necessário)")
-                print(f"3. Iniciar monitoramento{HackerTheme.RESET}")
+                print(f"2. Iniciar monitoramento{HackerTheme.RESET}")
                 
                 if input(f"\n{HackerTheme.TERMINAL}Continuar? (s/n): {HackerTheme.RESET}").lower() == 's':
                     # Detecta pacotes
@@ -845,7 +632,7 @@ def main_menu():
                     else:
                         HackerUI.print_log_entry("AUTO", "Nenhum pacote encontrado", "ERROR")
                 
-            elif choice == "8":
+            elif choice == "7":
                 # Sair
                 print(f"\n{HackerTheme.CYAN}{'─'*60}{HackerTheme.RESET}")
                 print(f"{HackerTheme.GREEN_NEON}🚀 Sistema encerrado. Até a próxima, hacker! 🚀{HackerTheme.RESET}")
