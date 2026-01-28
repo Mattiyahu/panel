@@ -7,10 +7,12 @@ import statistics
 
 STATE_FILE = "jarves_state.json"
 
-CHECK_INTERVAL = 10          # segundos
-LEARN_TIME = 120             # segundos (fase de aprendizado)
-FAIL_LIMIT = 6               # leituras ruins seguidas
-COOLDOWN = 30                # segundos entre restarts
+CHECK_INTERVAL = 10      # segundos
+LEARN_TIME = 120         # segundos (learning após Roblox rodar)
+FAIL_LIMIT = 6           # leituras ruins consecutivas
+COOLDOWN = 30            # cooldown entre reinícios
+
+VIP_LINK = ""            # opcional (se vazio, só abre o app)
 
 # =============================
 # 🔧 ADB HELPERS
@@ -47,16 +49,22 @@ def get_ram(pid):
     except:
         return 0.0
 
+def start(pkg):
+    if VIP_LINK:
+        adb(
+            f'shell am start -n {pkg}/com.roblox.client.ActivityProtocolLaunch '
+            f'-a android.intent.action.VIEW -d "{VIP_LINK}"'
+        )
+    else:
+        adb(f"shell monkey -p {pkg} 1")
+
 def restart(pkg):
     adb(f"shell am force-stop {pkg}")
     time.sleep(2)
-    adb(
-        f'shell am start -n {pkg}/com.roblox.client.ActivityProtocolLaunch '
-        f'-a android.intent.action.VIEW'
-    )
+    start(pkg)
 
 # =============================
-# 🧠 LEARNING CORE
+# 💾 STATE
 # =============================
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -77,17 +85,15 @@ def main():
         print("No Roblox packages found.")
         return
 
+    print(f"JARVES ONLINE — packages: {len(packages)}")
+
     state = load_state()
 
-    print("JARVES — Learning system started")
-    print(f"Packages: {len(packages)}")
-    print("Learning phase...")
-
-    start_time = time.time()
-
-    # Inicializar estruturas
-    for p in packages:
-        state.setdefault(p, {
+    # Inicializa estado
+    for pkg in packages:
+        state.setdefault(pkg, {
+            "learned": False,
+            "learning_start": None,
             "cpu_samples": [],
             "ram_samples": [],
             "cpu_min": None,
@@ -96,55 +102,74 @@ def main():
             "last_restart": 0
         })
 
-    # =============================
-    # FASE DE APRENDIZADO
-    # =============================
-    while time.time() - start_time < LEARN_TIME:
-        for pkg in packages:
-            pid = get_pid(pkg)
-            if not pid:
-                continue
-
-            cpu = get_cpu(pid)
-            ram = get_ram(pid)
-
-            if cpu > 0 and ram > 0:
-                state[pkg]["cpu_samples"].append(cpu)
-                state[pkg]["ram_samples"].append(ram)
-
-        time.sleep(CHECK_INTERVAL)
-
-    # Criar baseline
-    for pkg, data in state.items():
-        if data["cpu_samples"] and data["ram_samples"]:
-            cpu_avg = statistics.mean(data["cpu_samples"])
-            ram_avg = statistics.mean(data["ram_samples"])
-
-            data["cpu_min"] = round(cpu_avg * 0.35, 2)
-            data["ram_min"] = round(ram_avg * 0.45, 2)
-
-            print(f"{pkg}")
-            print(f"  CPU avg {cpu_avg:.2f}% → min {data['cpu_min']}%")
-            print(f"  RAM avg {ram_avg:.0f}MB → min {data['ram_min']}MB")
-
-            data["cpu_samples"].clear()
-            data["ram_samples"].clear()
-
     save_state(state)
-    print("Learning complete. Monitoring...")
+
+    # Start inicial
+    print("Starting Roblox...")
+    for pkg in packages:
+        start(pkg)
+        time.sleep(3)
+
+    print("Monitoring...")
 
     # =============================
-    # MONITORAMENTO CONTÍNUO
+    # LOOP DE MONITORAMENTO
     # =============================
     while True:
-        for pkg, data in state.items():
+        for pkg in packages:
+            data = state[pkg]
             pid = get_pid(pkg)
+
+            # Roblox caiu
             if not pid:
+                print(f"[OFFLINE] {pkg} restarting")
+                restart(pkg)
+                data["learning_start"] = None
+                data["learned"] = False
+                data["cpu_samples"].clear()
+                data["ram_samples"].clear()
                 continue
 
             cpu = get_cpu(pid)
             ram = get_ram(pid)
 
+            # =============================
+            # LEARNING PHASE (SÓ AGORA)
+            # =============================
+            if not data["learned"]:
+                if data["learning_start"] is None:
+                    print(f"[LEARN] {pkg} started")
+                    data["learning_start"] = time.time()
+
+                if cpu > 0 and ram > 0:
+                    data["cpu_samples"].append(cpu)
+                    data["ram_samples"].append(ram)
+
+                if time.time() - data["learning_start"] >= LEARN_TIME:
+                    if data["cpu_samples"] and data["ram_samples"]:
+                        cpu_avg = statistics.mean(data["cpu_samples"])
+                        ram_avg = statistics.mean(data["ram_samples"])
+
+                        data["cpu_min"] = round(cpu_avg * 0.35, 2)
+                        data["ram_min"] = round(ram_avg * 0.45, 2)
+
+                        print(
+                            f"[BASELINE] {pkg} "
+                            f"CPU avg {cpu_avg:.2f}% → min {data['cpu_min']}% | "
+                            f"RAM avg {ram_avg:.0f}MB → min {data['ram_min']}MB"
+                        )
+
+                        data["learned"] = True
+                        data["cpu_samples"].clear()
+                        data["ram_samples"].clear()
+                    continue
+
+                print(f"[LEARNING] {pkg} cpu {cpu:.1f}% ram {ram:.0f}MB")
+                continue
+
+            # =============================
+            # MONITOR REAL
+            # =============================
             bad = (
                 cpu < data["cpu_min"] or
                 ram < data["ram_min"]
@@ -152,9 +177,17 @@ def main():
 
             if bad:
                 data["fails"] += 1
-                print(f"[WARN] {pkg} low CPU/RAM ({cpu:.1f}% | {ram:.0f}MB) [{data['fails']}]")
+                print(
+                    f"[WARN] {pkg} low cpu/ram "
+                    f"{cpu:.1f}% | {ram:.0f}MB "
+                    f"[{data['fails']}/{FAIL_LIMIT}]"
+                )
             else:
                 data["fails"] = 0
+                print(
+                    f"[OK] {pkg} "
+                    f"{cpu:.1f}% | {ram:.0f}MB"
+                )
 
             if (
                 data["fails"] >= FAIL_LIMIT and
@@ -164,9 +197,16 @@ def main():
                 restart(pkg)
                 data["fails"] = 0
                 data["last_restart"] = time.time()
+                data["learned"] = False
+                data["learning_start"] = None
+                data["cpu_samples"].clear()
+                data["ram_samples"].clear()
 
         save_state(state)
         time.sleep(CHECK_INTERVAL)
 
+# =============================
+# ENTRY
+# =============================
 if __name__ == "__main__":
     main()
