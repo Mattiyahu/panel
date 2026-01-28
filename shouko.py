@@ -1530,44 +1530,107 @@ class UIManager:
 
 class RobloxManager:
 
-@staticmethod
-    def get_roblox_packages():
-        packages = []
-        try:
-            # Em vez de filtrar no comando, listamos TUDO (mais garantido no Termux)
-            # Tentamos o comando padrão e o caminho absoluto por segurança
-            cmd = "pm list packages"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            
-            # Se falhar (returncode != 0), tenta chamar o binário direto
-            if result.returncode != 0:
-                 result = subprocess.run("/system/bin/pm list packages", shell=True, capture_output=True, text=True)
+    @staticmethod
 
-            package_prefix = globals().get("package_prefix", "com.roblox")
-            
-            if result.returncode == 0:
-                for line in result.stdout.strip().splitlines():
-                    if line.startswith("package:"):
-                        name = line.replace("package:", "").strip()
-                        
-                        # CORREÇÃO AQUI:
-                        # 1. Verifica se começa com o prefixo configurado
-                        # 2. OU se contém "roblox" no nome (para pegar variantes estranhas como cliene, cliend)
-                        if (package_prefix in name) or ("roblox" in name.lower()):
-                            packages.append(name)
-            else:
-                print(f"\033[1;31m[ Shako.dev ] - Failed to list packages (System Error).\033[0m")
+    def get_cookie():
+
+        try:
+
+            current_dir = os.getcwd()
+
+            cookie_txt_path = os.path.join(current_dir, "cookie.txt")
+
+            new_dir_path = os.path.join(current_dir, "Shako.dev/Shako.dev - Data")
+
+            new_cookie_path = os.path.join(new_dir_path, "cookie.txt")
+
+
+
+            if not os.path.exists(new_dir_path):
+
+                os.makedirs(new_dir_path)
+
+
+
+            if not os.path.exists(cookie_txt_path):
+
+                print("\033[1;31m[ Shako.dev ] - cookie.txt not found in the current directory!\033[0m")
+
+                Utilities.log_error("cookie.txt not found in the current directory.")
+
+                return False
+
+
+
+            cookies = []
+
+            org = []
+
+
+
+            with open(cookie_txt_path, "r") as file:
+
+                for line in file.readlines():
+
+                    parts = str(line).strip().split(":")
+
+                    if len(parts) == 4:
+
+                        ck = ":".join(parts[2:])
+
+                    else:
+
+                        ck = str(line).strip()
+
+                    
+
+                    if ck.startswith("_|WARNING:") or ".ROBLOSECURITY" in ck or len(ck) > 100:
+
+                        org.append(str(line).strip())
+
+                        cookies.append(ck)
+
+
+
+            if len(cookies) == 0:
+
+                print("\033[1;31m[ Shako.dev ] - No valid cookies found in cookie.txt. Please add cookies.\033[0m")
+
+                Utilities.log_error("No valid cookies found in cookie.txt.")
+
+                return False
+
+
+
+            cookie = cookies.pop(0)
+
+            original_line = org.pop(0)
+
+
+
+            with open(new_cookie_path, "a") as new_file:
+
+                new_file.write(original_line + "\n")
+
+
+
+            with open(cookie_txt_path, "w") as file:
+
+                file.write("\n".join(org))
+
+
+
+            return cookie
+
+
 
         except Exception as e:
-            print(f"\033[1;31m[ Shako.dev ] - Error retrieving packages: {e}\033[0m")
-        
-        # Remove duplicatas e ordena a lista
-        unique_packages = sorted(list(set(packages)))
-        
-        if not unique_packages:
-             print(f"\033[1;33m[ Shako.dev ] - Warning: No Roblox packages found. Check if they are installed.\033[0m")
 
-        return unique_packages
+            print(f"\033[1;31m[ Shako.dev ] - Error: {e}\033[0m")
+
+            Utilities.log_error(f"Error in get_cookie: {e}")
+
+            return False
 
 
 
@@ -1705,33 +1768,40 @@ class RobloxManager:
 
     def get_roblox_packages():
 
-        packages = []
-
-        try:
+        packages = [] # Em vez de filtrar no comando, listamos TUDO (mais garantido no Termux)
+            # Tentamos o comando padrão e o caminho absoluto por segurança
+            cmd = "pm list packages"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            # Se falhar (returncode != 0), tenta chamar o binário direto
+            if result.returncode != 0:
+                 result = subprocess.run("/system/bin/pm list packages", shell=True, capture_output=True, text=True)
 
             package_prefix = globals().get("package_prefix", "com.roblox")
-
-            result = subprocess.run(f"pm list packages {package_prefix}", shell=True, capture_output=True, text=True)
-
+            
             if result.returncode == 0:
-
                 for line in result.stdout.strip().splitlines():
-
                     if line.startswith("package:"):
-
                         name = line.replace("package:", "").strip()
-
-                        packages.append(name)
-
+                        
+                        # CORREÇÃO AQUI:
+                        # 1. Verifica se começa com o prefixo configurado
+                        # 2. OU se contém "roblox" no nome (para pegar variantes estranhas como cliene, cliend)
+                        if (package_prefix in name) or ("roblox" in name.lower()):
+                            packages.append(name)
             else:
-
-                print(f"\033[1;31m[ Shako.dev ] - Failed to retrieve packages with prefix {package_prefix}.\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Failed to list packages (System Error).\033[0m")
 
         except Exception as e:
-
             print(f"\033[1;31m[ Shako.dev ] - Error retrieving packages: {e}\033[0m")
+        
+        # Remove duplicatas e ordena a lista
+        unique_packages = sorted(list(set(packages)))
+        
+        if not unique_packages:
+             print(f"\033[1;33m[ Shako.dev ] - Warning: No Roblox packages found. Check if they are installed.\033[0m")
 
-        return packages
+        return unique_packages
 
 
 
