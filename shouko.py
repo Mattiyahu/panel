@@ -1768,42 +1768,33 @@ class RobloxManager:
 
     def get_roblox_packages():
 
-        packages = [] # Em vez de filtrar no comando, listamos TUDO (mais garantido no Termux)
-            # Tentamos o comando padrão e o caminho absoluto por segurança
-            cmd = "pm list packages"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            
-            # Se falhar (returncode != 0), tenta chamar o binário direto
-            if result.returncode != 0:
-                 result = subprocess.run("/system/bin/pm list packages", shell=True, capture_output=True, text=True)
+        packages = []
 
+        try:
+
+            cmd = "pm list packages
+
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                result = subprocess.run("/system/bin/pm list packages", shell=True, capture_output=True, text=True)
             package_prefix = globals().get("package_prefix", "com.roblox")
-            
             if result.returncode == 0:
                 for line in result.stdout.strip().splitlines():
                     if line.startswith("package:"):
                         name = line.replace("package:", "").strip()
-                        
-                        # CORREÇÃO AQUI:
-                        # 1. Verifica se começa com o prefixo configurado
-                        # 2. OU se contém "roblox" no nome (para pegar variantes estranhas como cliene, cliend)
                         if (package_prefix in name) or ("roblox" in name.lower()):
                             packages.append(name)
             else:
                 print(f"\033[1;31m[ Shako.dev ] - Failed to list packages (System Error).\033[0m")
-
         except Exception as e:
             print(f"\033[1;31m[ Shako.dev ] - Error retrieving packages: {e}\033[0m")
-        
-        # Remove duplicatas e ordena a lista
         unique_packages = sorted(list(set(packages)))
         
         if not unique_packages:
              print(f"\033[1;33m[ Shako.dev ] - Warning: No Roblox packages found. Check if they are installed.\033[0m")
 
         return unique_packages
-
-
 
     @staticmethod
 
