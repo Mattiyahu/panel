@@ -1,11 +1,3 @@
-#!/data/data/com.termux/files/usr/bin/python
-# -*- coding: utf-8 -*-
-"""
-Shouko Bot v1.0.4 - Android Clean Edition
-Roblox Multi-Account Manager
-Optimized for Termux/Android - NO psutil dependency
-"""
-
 from prettytable import PrettyTable
 import threading
 import time
@@ -18,6 +10,14 @@ import traceback
 import random
 import gc
 import os
+
+# Importação condicional do psutil para compatibilidade com Termux
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
@@ -26,84 +26,6 @@ from rich.box import ROUNDED
 from rich.console import Console
 from datetime import datetime, timezone
 from threading import Lock, Event
-
-# =========================
-# ANDROID CLEAN MODE (NO /proc, NO psutil)
-# =========================
-
-IS_ANDROID = os.path.exists("/data/data/com.termux")
-
-def _safe_cmd(cmd):
-    """Execute command safely and return output"""
-    try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return None
-
-SYSTEM_BOOT_TIME = time.time()
-
-def safe_uptime():
-    """Get system uptime in seconds"""
-    if IS_ANDROID:
-        out = _safe_cmd("uptime -s")
-        if out:
-            try:
-                return time.time() - time.mktime(time.strptime(out, "%Y-%m-%d %H:%M:%S"))
-            except:
-                pass
-    return time.time() - SYSTEM_BOOT_TIME
-
-def safe_cpu():
-    """Get CPU usage percentage"""
-    if IS_ANDROID:
-        out = _safe_cmd("dumpsys cpuinfo | head -n 1")
-        if out and "%" in out:
-            try:
-                return float(out.split("%")[0].strip())
-            except:
-                pass
-    return 0.0
-
-def safe_memory():
-    """Get memory info (total, used, percent)"""
-    if IS_ANDROID:
-        out = _safe_cmd("dumpsys meminfo | grep 'Total RAM'")
-        if out:
-            try:
-                total = float(out.split(":")[1].split("K")[0].strip()) / (1024 * 1024)  # GB
-                used = total * 0.5  # Estimate
-                percent = 50.0
-                return total, used, percent
-            except:
-                pass
-    return 0.0, 0.0, 0.0
-
-def safe_kill_pid(pid):
-    """Kill process by PID safely"""
-    try:
-        subprocess.run(
-            ["kill", "-9", str(pid)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2
-        )
-        return True
-    except:
-        return False
-
-def get_pids_for_package(package_name):
-    """Get all PIDs for a package"""
-    try:
-        result = _safe_cmd(f"pidof {package_name}")
-        if result:
-            return [int(pid) for pid in result.split()]
-    except:
-        pass
-    return []
-
-# =========================
-# GLOBAL VARIABLES
-# =========================
 
 status_lock = Lock()
 rejoin_lock = Lock()
@@ -117,6 +39,29 @@ device_name = None
 webhook_interval = None
 reset_tab_interval = None
 close_and_rejoin_delay = None
+
+# Função segura para obter boot_time no Termux
+def get_safe_boot_time():
+    """Obtém o tempo de boot de forma segura, compatível com Termux."""
+    # Método 1: Tentar psutil (pode falhar no Termux sem root)
+    if PSUTIL_AVAILABLE:
+        try:
+            return psutil.boot_time()
+        except (PermissionError, OSError):
+            pass
+    
+    # Método 2: Ler /proc/uptime (mais permissivo no Termux)
+    try:
+        with open('/proc/uptime', 'r') as f:
+            uptime_seconds = float(f.readline().split()[0])
+            return time.time() - uptime_seconds
+    except (PermissionError, FileNotFoundError, OSError):
+        pass
+    
+    # Método 3: Usar o tempo atual como fallback
+    return time.time()
+
+system_boot_time = get_safe_boot_time()
 
 auto_android_id_enabled = False
 auto_android_id_thread = None
@@ -142,18 +87,13 @@ workspace_paths = [f"{base_path}Workspace" for base_path in executors.values()] 
 globals()["workspace_paths"] = workspace_paths
 globals()["executors"] = executors
 
-if not os.path.exists("Shouko.dev"):
-    os.makedirs("Shouko.dev", exist_ok=True)
-    
-SERVER_LINKS_FILE = "Shouko.dev/server-links.txt"
-ACCOUNTS_FILE = "Shouko.dev/accounts.txt"
-CONFIG_FILE = "Shouko.dev/config.json"
+if not os.path.exists("Shako.dev"):
+    os.makedirs("Shako.dev", exist_ok=True)
+SERVER_LINKS_FILE = "Shako.dev/server-links.txt"
+ACCOUNTS_FILE = "Shako.dev/accounts.txt"
+CONFIG_FILE = "Shako.dev/config.json"
 
-version = "1.0.4 - Android Clean | Created By Neyoshi And Improved By Nexus/Gemini"
-
-# =========================
-# UTILITY CLASSES
-# =========================
+version = "1.0.4 | Shako Edition - Termux Compatible"
 
 class Utilities:
     @staticmethod
@@ -167,12 +107,182 @@ class Utilities:
 
     @staticmethod
     def clear_screen():
-        os.system('clear')
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+class TermuxCompat:
+    """Classe para funções compatíveis com Termux."""
+    
+    @staticmethod
+    def get_cpu_percent(interval=None):
+        """Obtém uso de CPU de forma segura no Termux."""
+        if PSUTIL_AVAILABLE:
+            try:
+                return psutil.cpu_percent(interval=interval)
+            except (PermissionError, OSError):
+                pass
+        
+        # Fallback: ler /proc/stat
+        try:
+            with open('/proc/stat', 'r') as f:
+                line = f.readline()
+                if line.startswith('cpu '):
+                    values = line.split()[1:8]
+                    values = [int(v) for v in values]
+                    idle = values[3]
+                    total = sum(values)
+                    return round((1 - idle / total) * 100, 1)
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+        
+        return 0.0
+    
+    @staticmethod
+    def get_memory_info():
+        """Obtém informações de memória de forma segura no Termux."""
+        if PSUTIL_AVAILABLE:
+            try:
+                return psutil.virtual_memory()
+            except (PermissionError, OSError):
+                pass
+        
+        # Fallback: ler /proc/meminfo
+        try:
+            meminfo = {}
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        key = parts[0].rstrip(':')
+                        value = int(parts[1]) * 1024  # Converter KB para bytes
+                        meminfo[key] = value
+            
+            total = meminfo.get('MemTotal', 0)
+            available = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
+            used = total - available
+            percent = (used / total * 100) if total > 0 else 0
+            
+            class MemInfo:
+                pass
+            
+            info = MemInfo()
+            info.total = total
+            info.available = available
+            info.used = used
+            info.percent = percent
+            return info
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+        
+        # Fallback final
+        class MemInfo:
+            total = 0
+            available = 0
+            used = 0
+            percent = 0
+        return MemInfo()
+    
+    @staticmethod
+    def get_process_memory():
+        """Obtém uso de memória do processo atual."""
+        if PSUTIL_AVAILABLE:
+            try:
+                process = psutil.Process(os.getpid())
+                return process.memory_info().rss / (1024 ** 2)
+            except (PermissionError, OSError):
+                pass
+        
+        # Fallback: ler /proc/self/status
+        try:
+            with open('/proc/self/status', 'r') as f:
+                for line in f:
+                    if line.startswith('VmRSS:'):
+                        return int(line.split()[1]) / 1024  # KB para MB
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+        
+        return 0.0
+    
+    @staticmethod
+    def process_iter(attrs=None):
+        """Itera sobre processos de forma segura no Termux."""
+        if PSUTIL_AVAILABLE:
+            try:
+                for proc in psutil.process_iter(attrs):
+                    yield proc
+                return
+            except (PermissionError, OSError):
+                pass
+        
+        # Fallback: usar /proc diretamente
+        try:
+            for pid_str in os.listdir('/proc'):
+                if pid_str.isdigit():
+                    try:
+                        pid = int(pid_str)
+                        cmdline_path = f'/proc/{pid}/cmdline'
+                        comm_path = f'/proc/{pid}/comm'
+                        
+                        name = ""
+                        cmdline = []
+                        
+                        if os.path.exists(comm_path):
+                            with open(comm_path, 'r') as f:
+                                name = f.read().strip()
+                        
+                        if os.path.exists(cmdline_path):
+                            with open(cmdline_path, 'r') as f:
+                                cmdline = f.read().split('\x00')
+                        
+                        class ProcInfo:
+                            pass
+                        
+                        proc = ProcInfo()
+                        proc.info = {'pid': pid, 'name': name, 'cmdline': cmdline}
+                        proc.pid = pid
+                        yield proc
+                    except (PermissionError, FileNotFoundError, OSError):
+                        continue
+        except (PermissionError, OSError):
+            pass
+    
+    @staticmethod
+    def kill_process(pid):
+        """Mata um processo de forma segura."""
+        if PSUTIL_AVAILABLE:
+            try:
+                proc = psutil.Process(pid)
+                proc.kill()
+                return True
+            except (psutil.NoSuchProcess, PermissionError, OSError):
+                pass
+        
+        # Fallback: usar kill do sistema
+        try:
+            os.kill(pid, 9)  # SIGKILL
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        
+        return False
+    
+    @staticmethod
+    def cpu_count():
+        """Obtém número de CPUs."""
+        if PSUTIL_AVAILABLE:
+            try:
+                return psutil.cpu_count(logical=True)
+            except (PermissionError, OSError):
+                pass
+        
+        try:
+            return os.cpu_count() or 1
+        except:
+            return 1
 
 class FileManager:
-    SERVER_LINKS_FILE = "Shouko.dev/server-link.txt"
-    ACCOUNTS_FILE = "Shouko.dev/account.txt"
-    CONFIG_FILE = "Shouko.dev/config-wh.json"
+    SERVER_LINKS_FILE = "Shako.dev/server-link.txt"
+    ACCOUNTS_FILE = "Shako.dev/account.txt"
+    CONFIG_FILE = "Shako.dev/config-wh.json"
 
     @staticmethod
     def xuat(file_path):
@@ -205,11 +315,11 @@ class FileManager:
 
     @staticmethod
     def setup_user_ids():
-        print("\033[1;32m[ Shouko.dev ] - Auto-detecting User IDs from app packages...\033[0m")
+        print("\033[1;32m[ Shako.dev ] - Auto-detecting User IDs from app packages...\033[0m")
         packages = RobloxManager.get_roblox_packages()
         accounts = []
         if not packages:
-            print("\033[1;31m[ Shouko.dev ] - No Roblox packages detected to set up User IDs.\033[0m")
+            print("\033[1;31m[ Shako.dev ] - No Roblox packages detected to set up User IDs.\033[0m")
             return []
 
         for package_name in packages:
@@ -218,18 +328,18 @@ class FileManager:
                 user_id = FileManager.find_userid_from_file(file_path)
                 if user_id and user_id != "-1":
                     accounts.append((package_name, user_id))
-                    print(f"\033[96m[ Shouko.dev ] - Found UserID for {package_name}: {user_id}\033[0m")
+                    print(f"\033[96m[ Shako.dev ] - Found UserID for {package_name}: {user_id}\033[0m")
                 else:
-                    print(f"\033[1;31m[ Shouko.dev ] - UserID not found for {package_name}.\033[0m")
+                    print(f"\033[1;31m[ Shako.dev ] - UserID not found for {package_name}.\033[0m")
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error reading file for {package_name}: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error reading file for {package_name}: {e}\033[0m")
                 Utilities.log_error(f"Error reading appStorage.json for {package_name}: {e}")
 
         if accounts:
             FileManager.save_accounts(accounts)
-            print("\033[1;32m[ Shouko.dev ] - User IDs have been successfully saved.\033[0m")
+            print("\033[1;32m[ Shako.dev ] - User IDs have been successfully saved.\033[0m")
         else:
-            print("\033[1;31m[ Shouko.dev ] - Could not find any valid User IDs to set up.\033[0m")
+            print("\033[1;31m[ Shako.dev ] - Could not find any valid User IDs to set up.\033[0m")
             
         return accounts
 
@@ -240,9 +350,9 @@ class FileManager:
             with open(FileManager.SERVER_LINKS_FILE, "w") as file:
                 for package, link in server_links:
                     file.write(f"{package},{link}\n")
-            print("\033[1;32m[ Shouko.dev ] - Server links saved successfully.\033[0m")
+            print("\033[1;32m[ Shako.dev ] - Server links saved successfully.\033[0m")
         except IOError as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error saving server links: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error saving server links: {e}\033[0m")
             Utilities.log_error(f"Error saving server links: {e}")
 
     @staticmethod
@@ -277,7 +387,7 @@ class FileManager:
                             globals()["_user_"][package] = user_id
                             accounts.append((package, user_id))
                         except ValueError:
-                            print(f"\033[1;31m[ Shouko.dev ] - Invalid line format: {line}. Expected format 'package,user_id'.\033[0m")
+                            print(f"\033[1;31m[ Shako.dev ] - Invalid line format: {line}. Expected format 'package,user_id'.\033[0m")
         return accounts
 
     @staticmethod
@@ -298,7 +408,7 @@ class FileManager:
             userid = content[userid_start:userid_end]
             return userid
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error reading file: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error reading file: {e}\033[0m")
             return None
 
     @staticmethod
@@ -347,7 +457,7 @@ class FileManager:
             with open("usernames.json", "w") as file:
                 json.dump(data, file)
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error saving username: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error saving username: {e}\033[0m")
 
     @staticmethod
     def load_saved_username(user_id):
@@ -372,16 +482,16 @@ class FileManager:
                         shutil.copyfileobj(response.raw, file)
                     else:
                         file.write(response.text)
-                print(f"\033[1;32m[ Shouko.dev ] - {os.path.basename(destination)} downloaded successfully.\033[0m")
+                print(f"\033[1;32m[ Shako.dev ] - {os.path.basename(destination)} downloaded successfully.\033[0m")
                 return destination
             else:
                 error_message = f"Failed to download {os.path.basename(destination)}. Status code: {response.status_code}"
-                print(f"\033[1;31m[ Shouko.dev ] - {error_message}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - {error_message}\033[0m")
                 Utilities.log_error(error_message)
                 return None
         except Exception as e:
             error_message = f"Error while downloading {os.path.basename(destination)}: {e}"
-            print(f"\033[1;31m[ Shouko.dev ] - {error_message}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - {error_message}\033[0m")
             Utilities.log_error(error_message)
             return None
 
@@ -414,7 +524,7 @@ class FileManager:
                 close_and_rejoin_delay = None
                 reset_tab_interval = None
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error loading configuration: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error loading configuration: {e}\033[0m")
             Utilities.log_error(f"Error loading configuration: {e}")
 
     @staticmethod
@@ -432,9 +542,9 @@ class FileManager:
             }
             with open(FileManager.CONFIG_FILE, "w") as file:
                 json.dump(config, file, indent=4, sort_keys=True)
-            print("\033[1;32m[ Shouko.dev ] - Configuration saved successfully.\033[0m")
+            print("\033[1;32m[ Shako.dev ] - Configuration saved successfully.\033[0m")
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error saving configuration: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error saving configuration: {e}\033[0m")
             Utilities.log_error(f"Error saving configuration: {e}")
 
     @staticmethod
@@ -448,64 +558,120 @@ class FileManager:
 class SystemMonitor:
     @staticmethod
     def capture_screenshot():
-        path = "/storage/emulated/0/Download/screenshot.png"
+        screenshot_path = "/storage/emulated/0/Download/screenshot.png"
         try:
-            os.system(f"/system/bin/screencap -p {path}")
-            return path if os.path.exists(path) else None
-        except:
+            os.system(f"/system/bin/screencap -p {screenshot_path}")
+            if not os.path.exists(screenshot_path):
+                raise FileNotFoundError("Screenshot file was not created.")
+            return screenshot_path
+        except Exception as e:
+            print(f"\033[1;31m[ Shako.dev ] - Error capturing screenshot: {e}\033[0m")
+            Utilities.log_error(f"Error capturing screenshot: {e}")
             return None
 
     @staticmethod
     def get_uptime():
-        seconds = safe_uptime()
-        d = int(seconds // 86400)
-        h = int((seconds % 86400) // 3600)
-        m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
-        return f"{d}d {h}h {m}m {s}s"
-
-    @staticmethod
-    def get_memory_usage():
-        _, used, _ = safe_memory()
-        return round(used, 2)
-
-    @staticmethod
-    def get_system_info():
-        cpu = safe_cpu()
-        total, used, percent = safe_memory()
-
-        return {
-            "cpu_usage": cpu,
-            "memory_total": total,
-            "memory_used": used,
-            "memory_percent": percent,
-            "uptime": SystemMonitor.get_uptime(),
-            "roblox_packages": SystemMonitor.roblox_processes()
-        }
-
-    @staticmethod
-    def roblox_processes():
-        result = _safe_cmd("ps -A | grep roblox")
-        return result.splitlines() if result else []
+        """Obtém uptime de forma segura, compatível com Termux."""
+        try:
+            # Método 1: Ler /proc/uptime diretamente (mais confiável no Termux)
+            with open('/proc/uptime', 'r') as f:
+                uptime_seconds = float(f.readline().split()[0])
+        except (PermissionError, FileNotFoundError, OSError):
+            # Fallback: usar boot_time calculado
+            uptime_seconds = time.time() - system_boot_time
+        
+        days = int(uptime_seconds // (24 * 3600))
+        hours = int((uptime_seconds % (24 * 3600)) // 3600)
+        minutes = int((uptime_seconds % 3600) // 60)
+        seconds = int(uptime_seconds % 60)
+        return f"{days}d {hours}h {minutes}m {seconds}s"
 
     @staticmethod
     def get_pids_for_package(package_name):
-        """Get PIDs for a specific package"""
-        return get_pids_for_package(package_name)
+        pids = []
+        for proc in TermuxCompat.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                if package_name in proc.info['name']:
+                    pids.append(proc.info['pid'])
+                    continue
+                
+                cmdline = proc.info.get('cmdline')
+                if cmdline and any(package_name in s for s in cmdline):
+                    pids.append(proc.info['pid'])
+                    
+            except (AttributeError, KeyError):
+                continue
+        return list(set(pids))
+
+    @staticmethod
+    def roblox_processes():
+        package_names = []
+        package_namez = RobloxManager.get_roblox_packages()
+        for proc in TermuxCompat.process_iter(['name', 'pid', 'memory_info', 'cpu_percent']):
+            try:
+                proc_name = proc.info['name']
+                for package_name in package_namez:
+                    if package_name in proc_name or proc_name.lower() == package_name[-15:].lower():
+                        # Usar valores simplificados no Termux
+                        mem_usage = 0
+                        cpu_usage = 0
+                        
+                        if PSUTIL_AVAILABLE:
+                            try:
+                                p = psutil.Process(proc.pid)
+                                mem_usage = round(p.memory_info().rss / (1024 ** 2), 2)
+                                cpu_usage = round(p.cpu_percent(interval=None) / TermuxCompat.cpu_count(), 2)
+                            except:
+                                pass
+                        
+                        full_name = package_name
+                        package_names.append(f"{full_name} (PID: {proc.pid}, CPU: {cpu_usage}%, MEM: {mem_usage}MB)")
+                        break
+            except (AttributeError, KeyError):
+                continue
+        return package_names
+
+    @staticmethod
+    def get_memory_usage():
+        try:
+            return round(TermuxCompat.get_process_memory(), 2)
+        except Exception as e:
+            print(f"\033[1;31m[ Shako.dev ] - Error getting memory usage: {e}\033[0m")
+            Utilities.log_error(f"Error getting memory usage: {e}")
+            return None
+
+    @staticmethod
+    def get_system_info():
+        try:
+            cpu_usage = TermuxCompat.get_cpu_percent(interval=1)
+            memory_info = TermuxCompat.get_memory_info()
+            system_info = {
+                "cpu_usage": cpu_usage,
+                "memory_total": round(memory_info.total / (1024 ** 3), 2),
+                "memory_used": round(memory_info.used / (1024 ** 3), 2),
+                "memory_percent": memory_info.percent,
+                "uptime": SystemMonitor.get_uptime(),
+                "roblox_packages": SystemMonitor.roblox_processes()
+            }
+            return system_info
+        except Exception as e:
+            print(f"\033[1;31m[ Shako.dev ] - Error retrieving system information: {e}\033[0m")
+            Utilities.log_error(f"Error retrieving system information: {e}")
+            return False
 
 class UIManager:
     @staticmethod
     def print_header(version):
         console = Console()
         header = Text(r"""
-      _                   _                 
-  ___ | |__    ___   _ __ | | _____    __| | _____   __
- / __| '_ \ / _ \| | | | |/ / _ \ / _` |/ _ \ \ / /
- \__ \ | | | (_) | |_| |   < (_) | (_| |  __/\ V / 
- |___/_| |_|\___/ \__,_|_|_|\___(_)__,_|\___| \_/  
-        """, style="bold yellow")
+      _           _                 _            
+  ___| |__   __ _| | _____       __| | _____   __
+ / __| '_ \ / _` | |/ / _ \     / _` |/ _ \ \ / /
+ \__ \ | | | (_| |   < (_) |   | (_| |  __/\ V / 
+ |___/_| |_|\__,_|_|\_\___(_)   \__,_|\___| \_/  
+        """, style="bold cyan")
 
-        config_file = os.path.join("Shouko.dev", "config.json")
+        config_file = os.path.join("Shako.dev", "config.json")
         check_executor = "1"
         
         if os.path.exists(config_file):
@@ -514,16 +680,16 @@ class UIManager:
                     config = json.load(f)
                     check_executor = config.get("check_executor", "0")
             except Exception as e:
-                console.print(f"[bold red][ Shouko.dev ] - Error reading {config_file}: {e}[/bold red]")
+                console.print(f"[bold red][ Shako.dev ] - Error reading {config_file}: {e}[/bold red]")
 
         console.print(header)
-        console.print(f"[bold yellow]- Version: [/bold yellow][bold white]{version}[/bold white]")
-        console.print(f"[bold yellow]- Credit: [/bold yellow][bold white]Shouko.dev[/bold white]")
+        console.print(f"[bold cyan]- Version: [/bold cyan][bold white]{version}[/bold white]")
+        console.print(f"[bold cyan]- Credit: [/bold cyan][bold white]Shako.dev[/bold white]")
 
         if check_executor == "1":
-            console.print("[bold yellow]- Method: [/bold yellow][bold white]Check Executor[/bold white]")
+            console.print("[bold cyan]- Method: [/bold cyan][bold white]Check Executor[/bold white]")
         else:
-            console.print("[bold yellow]- Method: [/bold yellow][bold white]Check Online[/bold white]")
+            console.print("[bold cyan]- Method: [/bold cyan][bold white]Check Online[/bold white]")
         
         console.print("\n")
 
@@ -540,12 +706,12 @@ class UIManager:
         table.add_column("Service Name", style="bold magenta", justify="left")
 
         for i, service in enumerate(options, start=1):
-            table.add_row(f"[bold yellow][ {i} ][/bold yellow]", f"[bold blue]{service}[/bold blue]")
+            table.add_row(f"[bold cyan][ {i} ][/bold cyan]", f"[bold blue]{service}[/bold blue]")
 
         panel = Panel(
             table,
-            title="[bold yellow]discord.gg/ghmaDgNzDa - Beta Edition[/bold yellow]",
-            border_style="yellow",
+            title="[bold cyan]discord.gg/ghmaDgNzDa - Shako Edition[/bold cyan]",
+            border_style="cyan",
             box=ROUNDED
         )
 
@@ -568,9 +734,9 @@ class UIManager:
             return
         
         UIManager.last_update_time = current_time
-        cpu_usage = safe_cpu()
-        _, _, ram = safe_memory()
-        ram = round(ram, 2)
+        cpu_usage = TermuxCompat.get_cpu_percent(interval=None)
+        memory_info = TermuxCompat.get_memory_info()
+        ram = round(memory_info.used / memory_info.total * 100, 2) if memory_info.total > 0 else 0
         title = f"CPU: {cpu_usage}% | RAM: {ram}%"
 
         table_packages = PrettyTable(
@@ -603,14 +769,14 @@ class RobloxManager:
         try:
             current_dir = os.getcwd()
             cookie_txt_path = os.path.join(current_dir, "cookie.txt")
-            new_dir_path = os.path.join(current_dir, "Shouko.dev/Shoụko.dev - Data")
+            new_dir_path = os.path.join(current_dir, "Shako.dev/Shako.dev - Data")
             new_cookie_path = os.path.join(new_dir_path, "cookie.txt")
 
             if not os.path.exists(new_dir_path):
                 os.makedirs(new_dir_path)
 
             if not os.path.exists(cookie_txt_path):
-                print("\033[1;31m[ Shouko.dev ] - cookie.txt not found in the current directory!\033[0m")
+                print("\033[1;31m[ Shako.dev ] - cookie.txt not found in the current directory!\033[0m")
                 Utilities.log_error("cookie.txt not found in the current directory.")
                 return False
 
@@ -630,7 +796,7 @@ class RobloxManager:
                         cookies.append(ck)
 
             if len(cookies) == 0:
-                print("\033[1;31m[ Shouko.dev ] - No valid cookies found in cookie.txt. Please add cookies.\033[0m")
+                print("\033[1;31m[ Shako.dev ] - No valid cookies found in cookie.txt. Please add cookies.\033[0m")
                 Utilities.log_error("No valid cookies found in cookie.txt.")
                 return False
 
@@ -646,7 +812,7 @@ class RobloxManager:
             return cookie
 
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error: {e}\033[0m")
             Utilities.log_error(f"Error in get_cookie: {e}")
             return False
 
@@ -664,18 +830,18 @@ class RobloxManager:
             response = requests.get('https://users.roblox.com/v1/users/authenticated', headers=headers)
 
             if response.status_code == 200:
-                print("\033[1;32m[ Shouko.dev ] - Cookie is valid! User is authenticated.\033[0m")
+                print("\033[1;32m[ Shako.dev ] - Cookie is valid! User is authenticated.\033[0m")
                 return response.json().get("id", False)
             elif response.status_code == 401:
-                print("\033[1;31m[ Shouko.dev ] - Invalid cookie. The user is not authenticated.\033[0m")
+                print("\033[1;31m[ Shako.dev ] - Invalid cookie. The user is not authenticated.\033[0m")
                 return False
             else:
                 error_message = f"Error verifying cookie: {response.status_code}"
-                print(f"\033[1;31m[ Shouko.dev ] - {error_message}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - {error_message}\033[0m")
                 return False
 
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error verify cookie: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error verify cookie: {e}\033[0m")
             return False
 
     @staticmethod
@@ -727,24 +893,24 @@ class RobloxManager:
                         name = line.replace("package:", "").strip()
                         packages.append(name)
             else:
-                print(f"\033[1;31m[ Shouko.dev ] - Failed to retrieve packages with prefix {package_prefix}.\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Failed to retrieve packages with prefix {package_prefix}.\033[0m")
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error retrieving packages: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error retrieving packages: {e}\033[0m")
         return packages
 
     @staticmethod
     def kill_roblox_processes():
         packages = RobloxManager.get_roblox_packages()
         if not packages:
-            print("\033[1;32m[ Shouko.dev ] - No Roblox packages found to kill.\033[0m")
+            print("\033[1;32m[ Shako.dev ] - No Roblox packages found to kill.\033[0m")
             return
 
-        print(f"\033[1;93m[ Shouko.dev ] - Found {len(packages)} packages. Starting FAST clean kill for all...\033[0m")
+        print(f"\033[1;93m[ Shako.dev ] - Found {len(packages)} packages. Starting FAST clean kill for all...\033[0m")
         
         all_pids_to_kill = set()
         
         # Stage 1: Issue 'am force-stop' and collect all PIDs
-        print("\033[1;96m[ Shouko.dev ] - Stage 1: Issuing 'am force-stop' for all packages...\033[0m")
+        print("\033[1;96m[ Shako.dev ] - Stage 1: Issuing 'am force-stop' for all packages...\033[0m")
         for package_name in packages:
             # Issue command
             subprocess.run(
@@ -753,49 +919,50 @@ class RobloxManager:
             )
             # Collect PIDs
             try:
-                pids = get_pids_for_package(package_name)
+                pids = SystemMonitor.get_pids_for_package(package_name)
                 if pids:
                     all_pids_to_kill.update(pids)
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error getting PIDs for {package_name}: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error getting PIDs for {package_name}: {e}\033[0m")
         
         # Short delay for 'am force-stop' commands to propagate
         time.sleep(0.25) 
         
         # Stage 2: Kill all collected lingering PIDs
         if all_pids_to_kill:
-            print(f"\033[1;93m[ Shouko.dev ] - Stage 2: Found {len(all_pids_to_kill)} lingering PIDs. Sending SIGKILL...\033[0m")
+            print(f"\033[1;93m[ Shako.dev ] - Stage 2: Found {len(all_pids_to_kill)} lingering PIDs. Sending SIGKILL...\033[0m")
             for pid in all_pids_to_kill:
-                safe_kill_pid(pid)
+                TermuxCompat.kill_process(pid)
         else:
-            print("\033[1;32m[ Shouko.dev ] - Stage 2: No lingering PIDs found. 'am force-stop' was successful.\033[0m")
+            print("\033[1;32m[ Shako.dev ] - Stage 2: No lingering PIDs found. 'am force-stop' was successful.\033[0m")
 
-        print("\033[1;32m[ Shouko.dev ] - All Roblox processes have been issued kill commands.\033[0m")
+        print("\033[1;32m[ Shako.dev ] - All Roblox processes have been issued kill commands.\033[0m")
         
     @staticmethod
     def kill_roblox_process(package_name):
         try:
-            print(f"\033[1;96m[ Shouko.dev ] - Sending 'am force-stop' for {package_name}...\033[0m")
+            print(f"\033[1;96m[ Shako.dev ] - Sending 'am force-stop' for {package_name}...\033[0m")
             subprocess.run(
                 ["/system/bin/am", "force-stop", package_name],
                 capture_output=True, text=True, check=False
             )
             time.sleep(0.25) 
 
-            pids = get_pids_for_package(package_name)
+            pids = SystemMonitor.get_pids_for_package(package_name)
             if pids:
-                print(f"\033[1;93m[ Shouko.dev ] - Found lingering PIDs for {package_name}: {pids}. Sending SIGKILL...\033[0m")
+                print(f"\033[1;93m[ Shako.dev ] - Found lingering PIDs for {package_name}: {pids}. Sending SIGKILL...\033[0m")
                 for pid in pids:
-                    safe_kill_pid(pid)
+                    TermuxCompat.kill_process(pid)
             else:
-                print(f"\033[1;32m[ Shouko.dev ] - No lingering PIDs found for {package_name}.\033[0m")
+                print(f"\033[1;32m[ Shako.dev ] - No lingering PIDs found for {package_name}.\033[0m")
             
-            print(f"\033[1;32m[ Shouko.dev ] - Clean kill complete for {package_name}\033[0m")
+            print(f"\033[1;32m[ Shako.dev ] - Clean kill complete for {package_name}\033[0m")
             time.sleep(0.1)
 
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error during kill process for {package_name}: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error during kill process for {package_name}: {e}\033[0m")
             Utilities.log_error(f"Error in kill_roblox_process for {package_name}: {e}\n{traceback.format_exc()}")
+
 
     @staticmethod
     def delete_cache_for_package(package_name):
@@ -812,9 +979,9 @@ class RobloxManager:
                 subprocess.run(["rm", "-rf", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 cleared = True
         if cleared:
-            print(f"\033[1;32m[ Shouko.dev ] - Deep cache cleaned for {package_name} (Fix Update/Freeze)\033[0m")
+            print(f"\033[1;32m[ Shako.dev ] - Deep cache cleaned for {package_name} (Fix Update/Freeze)\033[0m")
         else:
-            print(f"\033[1;93m[ Shouko.dev ] - Cache already clean for {package_name}\033[0m")
+            print(f"\033[1;93m[ Shako.dev ] - Cache already clean for {package_name}\033[0m")
 
     @staticmethod
     def launch_roblox(package_name, server_link):
@@ -829,7 +996,7 @@ class RobloxManager:
                     globals()["package_statuses"][package_name]["Status"] = f"\033[1;36mJoining Game (Skip Home/Update) for {package_name}...\033[0m"
                     UIManager.update_status_table()
 
-            print(f"\033[1;35m[ Shouko.dev ] - Executing Direct Launch (Skip Home) for {package_name}...\033[0m")
+            print(f"\033[1;35m[ Shako.dev ] - Executing Direct Launch (Skip Home) for {package_name}...\033[0m")
             
             launch_cmd = [
                 'am', 'start',
@@ -853,7 +1020,7 @@ class RobloxManager:
                 if package_name in globals()["package_statuses"]:
                     globals()["package_statuses"][package_name]["Status"] = f"\033[1;31m{error_message}\033[0m"
                     UIManager.update_status_table()
-            print(f"\033[1;31m[ Shouko.dev ] - {error_message}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - {error_message}\033[0m")
             Utilities.log_error(f"Error in launch_roblox for {package_name}: {e}\n{traceback.format_exc()}")
 
     @staticmethod
@@ -899,29 +1066,29 @@ class RobloxManager:
         downloaded_appstorage_path = FileManager.download_file(appstorage_url, "appStorage.json", binary=False)
 
         if not downloaded_db_path or not downloaded_appstorage_path:
-            print("\033[1;31m[ Shouko.dev ] - Failed to download necessary files. Exiting.\033[0m")
+            print("\033[1;31m[ Shako.dev ] - Failed to download necessary files. Exiting.\033[0m")
             return
 
         packages = RobloxManager.get_roblox_packages()
         if not packages:
-            print("\033[1;31m[ Shouko.dev ] - No Roblox packages detected.\033[0m")
+            print("\033[1;31m[ Shako.dev ] - No Roblox packages detected.\033[0m")
             return
 
         for package_name in packages:
             try:
                 cookie = RobloxManager.get_cookie()
                 if not cookie:
-                    print(f"\033[1;31m[ Shouko.dev ] - Failed to retrieve a cookie for {package_name}. Skipping...\033[0m")
+                    print(f"\033[1;31m[ Shako.dev ] - Failed to retrieve a cookie for {package_name}. Skipping...\033[0m")
                     break
 
                 user_id = RobloxManager.verify_cookie(cookie)
                 if user_id:
-                    print(f"\033[1;32m[ Shouko.dev ] - Cookie for {package_name} is valid! User ID: {user_id}\033[0m")
+                    print(f"\033[1;32m[ Shako.dev ] - Cookie for {package_name} is valid! User ID: {user_id}\033[0m")
                 else:
-                    print(f"\033[1;31m[ Shouko.dev ] - Cookie for {package_name} is invalid. Skipping injection...\033[0m")
+                    print(f"\033[1;31m[ Shako.dev ] - Cookie for {package_name} is invalid. Skipping injection...\033[0m")
                     continue
 
-                print(f"\033[1;32m[ Shouko.dev ] - Injecting cookie for {package_name}...\033[0m")
+                print(f"\033[1;32m[ Shako.dev ] - Injecting cookie for {package_name}...\033[0m")
 
                 destination_db_dir = f"/data/data/{package_name}/app_webview/Default/"
                 destination_appstorage_dir = f"/data/data/{package_name}/files/appData/LocalStorage/"
@@ -938,20 +1105,20 @@ class RobloxManager:
                 shutil.copyfile(downloaded_db_path, destination_db_path)
                 RobloxManager.replace_cookie_value_in_db(destination_db_path, cookie)
 
-                print(f"\033[1;33m[ Shouko.dev ] - Fixing permissions for {package_name}...\033[0m")
+                print(f"\033[1;33m[ Shako.dev ] - Fixing permissions for {package_name}...\033[0m")
                 RobloxManager.fix_permissions(destination_db_path, package_name)
                 RobloxManager.fix_permissions(destination_appstorage_path, package_name)
 
-                print(f"\033[1;36m[ Shouko.dev ] - Launching {package_name} to check login...\033[0m")
+                print(f"\033[1;36m[ Shako.dev ] - Launching {package_name} to check login...\033[0m")
                 subprocess.run(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(5) 
 
             except Exception as e:
                 error_message = f"Error injecting cookie for {package_name}: {e}"
-                print(f"\033[1;31m[ Shouko.dev ] - {error_message}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - {error_message}\033[0m")
                 traceback.print_exc()
 
-        print("\033[1;33m[ Shouko.dev ] - Injection & Auto Launch done.\033[0m")
+        print("\033[1;33m[ Shako.dev ] - Injection & Auto Launch done.\033[0m")
 
     @staticmethod
     def replace_cookie_value_in_db(db_path, new_cookie_value):
@@ -974,7 +1141,7 @@ class RobloxManager:
         elif input_link.isdigit():
             return f'roblox://placeID={input_link}'
         else:
-            print("\033[1;31m[ Shouko.dev ] - Invalid input! Please enter a valid game ID or private server link.\033[0m")
+            print("\033[1;31m[ Shako.dev ] - Invalid input! Please enter a valid game ID or private server link.\033[0m")
             return None
 
 class ExecutorManager:
@@ -993,7 +1160,7 @@ class ExecutorManager:
             for path in possible_autoexec_paths:
                 if os.path.exists(path):
                     detected_executors.append(executor_name)
-                    console.print(f"[bold green][ Shouko.dev ] - Detected executor: {executor_name}[/bold green]")
+                    console.print(f"[bold green][ Shako.dev ] - Detected executor: {executor_name}[/bold green]")
                     break
 
         return detected_executors
@@ -1001,7 +1168,7 @@ class ExecutorManager:
     @staticmethod
     def write_lua_script(detected_executors):
         console = Console()
-        config_file = os.path.join("Shouko.dev", "checkui.lua")
+        config_file = os.path.join("Shako.dev", "checkui.lua")
         
         if not os.path.exists(config_file):
                  with open(config_file, "w") as f:
@@ -1011,7 +1178,7 @@ class ExecutorManager:
             with open(config_file, "r") as f:
                 lua_script_content = f.read()
         except Exception as e:
-            console.print(f"[bold red][ Shouko.dev ] - Error reading config from {config_file}: {e}[/bold red]")
+            console.print(f"[bold red][ Shako.dev ] - Error reading config from {config_file}: {e}[/bold red]")
             return
 
         for executor_name in detected_executors:
@@ -1034,13 +1201,13 @@ class ExecutorManager:
                             with open(lua_script_path, 'w') as file:
                                 file.write(lua_script_content)
                                 lua_written = True
-                                console.print(f"[bold green][ Shouko.dev ] - Lua script written to: {lua_script_path}[/bold green]")
+                                console.print(f"[bold green][ Shako.dev ] - Lua script written to: {lua_script_path}[/bold green]")
                                 break
                         except Exception as e:
-                            console.print(f"[bold red][ Shouko.dev ] - Error writing Lua script to {lua_script_path}: {e}[/bold red]")
+                            console.print(f"[bold red][ Shako.dev ] - Error writing Lua script to {lua_script_path}: {e}[/bold red]")
 
             if not lua_written:
-                console.print(f"[bold yellow][ Shouko.dev ] - No valid path found to write Lua script for {executor_name}[/bold yellow]")
+                console.print(f"[bold yellow][ Shako.dev ] - No valid path found to write Lua script for {executor_name}[/bold yellow]")
 
     @staticmethod
     def check_executor_status(package_name, continuous=True, max_wait_time=240):
@@ -1126,10 +1293,10 @@ class WebhookManager:
                     ],
                     "thumbnail": {"url": "https://i.imgur.com/5yXNxU4.png"},
                     "image": {"url": "attachment://screenshot.png"},
-                    "footer": {"text": f"Made with 💖 by Shouko.dev | Join us at discord.gg/rokidmanager",
+                    "footer": {"text": f"Made with 💖 by Shako.dev | Join us at discord.gg/rokidmanager",
                                "icon_url": "https://i.imgur.com/5yXNxU4.png"},
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "author": {"name": "Shouko.dev",
+                    "author": {"name": "Shako.dev",
                                "url": "https://discord.gg/rokidmanager",
                                "icon_url": "https://i.imgur.com/5yXNxU4.png"}
                 }
@@ -1137,16 +1304,16 @@ class WebhookManager:
                 with open(screenshot_path, "rb") as file:
                     response = requests.post(
                         webhook_url,
-                        data={"payload_json": json.dumps({"embeds": [embed], "username": "Shouko.dev", "avatar_url": "https://i.imgur.com/5yXNxU4.png"})},
+                        data={"payload_json": json.dumps({"embeds": [embed], "username": "Shako.dev", "avatar_url": "https://i.imgur.com/5yXNxU4.png"})},
                         files={"file": ("screenshot.png", file)}
                     )
 
                 if response.status_code not in (200, 204):
-                    print(f"\033[1;31m[ Shouko.dev ] - Error sending device info: {response.status_code}\033[0m")
+                    print(f"\033[1;31m[ Shako.dev ] - Error sending device info: {response.status_code}\033[0m")
                     Utilities.log_error(f"Error sending webhook: Status code {response.status_code}")
 
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Webhook error: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Webhook error: {e}\033[0m")
                 Utilities.log_error(f"Error in webhook thread: {e}")
 
             time.sleep(webhook_interval * 60)
@@ -1161,14 +1328,14 @@ class WebhookManager:
         global webhook_url, device_name, webhook_interval, stop_webhook_thread
         try:
             stop_webhook_thread = True
-            webhook_url = input("\033[1;35m[ Shouko.dev ] - Enter your Webhook URL: \033[0m")
-            device_name = input("\033[1;35m[ Shouko.dev ] - Enter your device name: \033[0m")
-            webhook_interval = int(input("\033[1;35m[ Shouko.dev ] - Enter the interval to send Webhook (minutes): \033[0m"))
+            webhook_url = input("\033[1;35m[ Shako.dev ] - Enter your Webhook URL: \033[0m")
+            device_name = input("\033[1;35m[ Shako.dev ] - Enter your device name: \033[0m")
+            webhook_interval = int(input("\033[1;35m[ Shako.dev ] - Enter the interval to send Webhook (minutes): \033[0m"))
             FileManager.save_config()
             stop_webhook_thread = False
             threading.Thread(target=WebhookManager.send_webhook).start()
         except Exception as e:
-            print(f"\033[1;31m[ Shouko.dev ] - Error during webhook setup: {e}\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Error during webhook setup: {e}\033[0m")
             Utilities.log_error(f"Error during webhook setup: {e}")
 
 class PackageMonitor:
@@ -1195,30 +1362,30 @@ class PackageMonitor:
             
             self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.thread.start()
-            print(f"\033[1;35m[ Shouko.dev ] - Monitor thread started for {self.package_name}\033[0m")
+            print(f"\033[1;35m[ Shako.dev ] - Monitor thread started for {self.package_name}\033[0m")
 
     def stop(self):
         self.stop_event.set()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=5)
-        print(f"\033[1;31m[ Shouko.dev ] - Monitor thread stopped for {self.package_name}\033[0m")
+        print(f"\033[1;31m[ Shako.dev ] - Monitor thread stopped for {self.package_name}\033[0m")
 
     def wait_for_ready(self, timeout=240):
-        print(f"\033[1;33m[ Shouko.dev ] - Waiting for executor signal from {self.package_name} (Timeout: {timeout}s)...\033[0m")
+        print(f"\033[1;33m[ Shako.dev ] - Waiting for executor signal from {self.package_name} (Timeout: {timeout}s)...\033[0m")
         with status_lock:
             if self.package_name in globals()["package_statuses"]:
                 globals()["package_statuses"][self.package_name]["Status"] = "\033[1;33mWaiting for Executor...\033[0m"
                 UIManager.update_status_table()
                 
         if not self.ready_event.wait(timeout=timeout):
-            print(f"\033[1;31m[ Shouko.dev ] - Timeout waiting for executor on {self.package_name}!\033[0m")
+            print(f"\033[1;31m[ Shako.dev ] - Timeout waiting for executor on {self.package_name}!\033[0m")
             with status_lock:
                  if self.package_name in globals()["package_statuses"]:
                      globals()["package_statuses"][self.package_name]["Status"] = "\033[1;31mExecutor Timeout!\033[0m"
                      UIManager.update_status_table()
             return False
         
-        print(f"\033[1;32m[ Shouko.dev ] - Executor signal RECEIVED from {self.package_name}.\033[0m")
+        print(f"\033[1;32m[ Shako.dev ] - Executor signal RECEIVED from {self.package_name}.\033[0m")
         return True
 
     def _monitor_loop(self):
@@ -1257,7 +1424,7 @@ class PackageMonitor:
                     elapsed_time = current_time - self.last_seen_time
                     
                     if elapsed_time > 240:
-                        print(f"\033[1;31m[ Shouko.dev ] - {self.package_name}: Executor crash detected (No signal for 240s). Restarting...\033[0m")
+                        print(f"\033[1;31m[ Shako.dev ] - {self.package_name}: Executor crash detected (No signal for 240s). Restarting...\033[0m")
                         
                         with status_lock:
                             if self.package_name in globals()["package_statuses"]:
@@ -1274,7 +1441,7 @@ class PackageMonitor:
                             
                             ExecutorManager.reset_executor_file(self.package_name)
                             
-                            print(f"\033[1;33m[ Shouko.dev ] - Re-launching {self.package_name}...\033[0m")
+                            print(f"\033[1;33m[ Shako.dev ] - Re-launching {self.package_name}...\033[0m")
                             RobloxManager.launch_roblox(self.package_name, self.server_link)
                             
                             self.last_seen_time = time.time()
@@ -1293,11 +1460,11 @@ class PackageMonitor:
                         self.stop_event.wait(10)
 
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error in monitor loop for {self.package_name}: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error in monitor loop for {self.package_name}: {e}\033[0m")
                 Utilities.log_error(f"Error in monitor loop for {self.package_name}: {e}\n{traceback.format_exc()}")
                 self.stop_event.wait(10)
         
-        print(f"\033[1;31m[ Shouko.dev ] - Monitor loop for {self.package_name} terminated.\033[0m")
+        print(f"\033[1;31m[ Shako.dev ] - Monitor loop for {self.package_name} terminated.\033[0m")
 
 
 class Runner:
@@ -1307,7 +1474,7 @@ class Runner:
         for package_name, server_link in server_links:
             user_id = globals()["_user_"].get(package_name, "Unknown")
             if user_id == "Unknown":
-                print(f"\033[1;31m[ Shouko.dev ] - No UserID found for {package_name}, skipping...\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - No UserID found for {package_name}, skipping...\033[0m")
                 continue
             username = FileManager.get_username(user_id)
             with status_lock:
@@ -1321,11 +1488,11 @@ class Runner:
         for index, (package_name, server_link, user_id) in enumerate(packages_to_launch):
             
             if main_stop_event.is_set():
-                print("\033[1;31m[ Shouko.dev ] - Main stop event triggered. Aborting launch sequence.\033[0m")
+                print("\033[1;31m[ Shako.dev ] - Main stop event triggered. Aborting launch sequence.\033[0m")
                 break
 
             with rejoin_lock:
-                print(f"\033[1;32m[ Shouko.dev ] - Launching package {index + 1}/{total_packages}: {package_name}\033[0m")
+                print(f"\033[1;32m[ Shako.dev ] - Launching package {index + 1}/{total_packages}: {package_name}\033[0m")
                 
                 try:
                     RobloxManager.launch_roblox(package_name, server_link)
@@ -1336,7 +1503,7 @@ class Runner:
                         
                         detected_executors = ExecutorManager.detect_executors()
                         if not detected_executors:
-                                print(f"\033[1;41m[ Shouko.dev ] - NO EXECUTOR DETECTED FOR {package_name}! EXITING TOOL.\033[0m")
+                                print(f"\033[1;41m[ Shako.dev ] - NO EXECUTOR DETECTED FOR {package_name}! EXITING TOOL.\033[0m")
                                 globals()["package_statuses"][package_name]["Status"] = "\033[1;31mNO EXECUTOR - EXITING\033[0m"
                                 UIManager.update_status_table()
                                 RobloxManager.kill_roblox_processes()
@@ -1349,7 +1516,7 @@ class Runner:
                         monitor.start()
 
                         if not monitor.wait_for_ready():
-                            print(f"\033[1;31m[ Shouko.dev ] - Executor for {package_name} failed to load. Check logs. Continuing to next package...\033[0m")
+                            print(f"\033[1;31m[ Shako.dev ] - Executor for {package_name} failed to load. Check logs. Continuing to next package...\033[0m")
                         
                         time.sleep(5)
 
@@ -1398,11 +1565,11 @@ class Runner:
                 
                 stop_event.wait(240)
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error in presence monitor: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error in presence monitor: {e}\033[0m")
                 Utilities.log_error(f"Error in presence monitor: {e}\n{traceback.format_exc()}")
                 stop_event.wait(240)
         
-        print("\033[1;31m[ Shouko.dev ] - Presence monitor terminated.\033[0m")
+        print("\033[1;31m[ Shako.dev ] - Presence monitor terminated.\033[0m")
 
 
     @staticmethod
@@ -1413,17 +1580,17 @@ class Runner:
         while not stop_event.is_set():
             current_time = time.time()
             if force_rejoin_interval != float('inf') and (current_time - start_time >= force_rejoin_interval):
-                print("\033[1;31m[ Shouko.dev ] - Force killing Roblox processes due to time limit.\033[0m")
+                print("\033[1;31m[ Shako.dev ] - Force killing Roblox processes due to time limit.\033[0m")
                 
                 with rejoin_lock: 
-                    print("\033[1;31m[ Shouko.dev ] - Stopping all package monitors for force rejoin...\033[0m")
+                    print("\033[1;31m[ Shako.dev ] - Stopping all package monitors for force rejoin...\033[0m")
                     for monitor in package_monitors.values():
                         monitor.stop()
                     package_monitors.clear()
 
                     RobloxManager.kill_roblox_processes()
                     start_time = time.time()
-                    print("\033[1;33m[ Shouko.dev ] - Waiting before starting the rejoin process...\033[0m")
+                    print("\033[1;33m[ Shako.dev ] - Waiting before starting the rejoin process...\033[0m")
                     time.sleep(5)
                     
                     Runner.launch_package_sequentially(server_links, package_monitors, stop_event)
@@ -1434,7 +1601,7 @@ class Runner:
                 
             stop_event.wait(wait_time)
             
-        print("\033[1;31m[ Shouko.dev ] - Force rejoin monitor terminated.\033[0m")
+        print("\033[1;31m[ Shako.dev ] - Force rejoin monitor terminated.\033[0m")
 
 
     @staticmethod
@@ -1445,14 +1612,14 @@ class Runner:
 
     @staticmethod
     def logout_all_packages():
-        print("\033[1;32m[ Shouko.dev ] - Scanning packages to Log Out...\033[0m")
+        print("\033[1;32m[ Shako.dev ] - Scanning packages to Log Out...\033[0m")
         packages = RobloxManager.get_roblox_packages()
         
         if not packages:
-            print("\033[1;31m[ Shouko.dev ] - No Roblox packages found!\033[0m")
+            print("\033[1;31m[ Shako.dev ] - No Roblox packages found!\033[0m")
             return
 
-        print(f"\033[1;33m[ Shouko.dev ] - Found {len(packages)} packages. Cleaning data...\033[0m")
+        print(f"\033[1;33m[ Shako.dev ] - Found {len(packages)} packages. Cleaning data...\033[0m")
 
         for package_name in packages:
             try:
@@ -1468,12 +1635,12 @@ class Runner:
                     stderr=subprocess.DEVNULL
                 )
                 
-                print(f"\033[1;32m[ Shouko.dev ] - Logged out {package_name} (Deleted Cookies & appStorage)\033[0m")
+                print(f"\033[1;32m[ Shako.dev ] - Logged out {package_name} (Deleted Cookies & appStorage)\033[0m")
                 
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error logging out {package_name}: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error logging out {package_name}: {e}\033[0m")
                 
-        print("\033[1;33m[ Shouko.dev ] - Logout Process Completed.\033[0m")
+        print("\033[1;33m[ Shako.dev ] - Logout Process Completed.\033[0m")
 
 def check_activation_status():
     return True 
@@ -1503,9 +1670,9 @@ def main():
     if not globals().get("command_8_configured", False):
         globals()["check_exec_enable"] = "1"
         globals()["lua_script_template"] = 'if not game:IsLoaded() then game.Loaded:Wait() end local f = tostring(game.Players.LocalPlayer.UserId)..".main" local c = "https://discord.gg/FcEGmkNDDe" local function w() local g = pcall(writefile, f, c) if not g then game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer) end end task.spawn(function() w() while true do task.wait(5) w() end end)'
-        config_file = os.path.join("Shouko.dev", "checkui.lua")
+        config_file = os.path.join("Shako.dev", "checkui.lua")
         try:
-            os.makedirs("Shouko.dev", exist_ok=True)
+            os.makedirs("Shako.dev", exist_ok=True)
             with open(config_file, "w") as f:
                 f.write(globals()["lua_script_template"])
         except Exception as e:
@@ -1539,11 +1706,11 @@ def main():
         ]
 
         UIManager.create_dynamic_menu(menu_options)
-        setup_type = input("\033[1;93m[ Shouko.dev ] - Enter command: \033[0m")
+        setup_type = input("\033[1;93m[ Shako.dev ] - Enter command: \033[0m")
         
         if setup_type == "1":
             try:
-                print("\033[1;33m[ Shouko.dev ] - Stopping all existing monitoring tasks...\033[0m")
+                print("\033[1;33m[ Shako.dev ] - Stopping all existing monitoring tasks...\033[0m")
                 main_stop_event.set()
                 for t in monitoring_threads:
                     t.join(timeout=5)
@@ -1552,7 +1719,7 @@ def main():
                 for monitor in package_monitors.values():
                     monitor.stop()
                 package_monitors.clear()
-                print("\033[1;32m[ Shouko.dev ] - All tasks stopped.\033[0m")
+                print("\033[1;32m[ Shako.dev ] - All tasks stopped.\033[0m")
 
                 main_stop_event.clear()
 
@@ -1560,7 +1727,7 @@ def main():
                 globals()["accounts"] = FileManager.load_accounts()
                 
                 if not globals()["accounts"]:
-                    print("\033[1;31m[ Shouko.dev ] - No User IDs were found.\033[0m")
+                    print("\033[1;31m[ Shako.dev ] - No User IDs were found.\033[0m")
                     input("\033[1;32mPress Enter to return...\033[0m")
                     continue
                 
@@ -1568,17 +1735,17 @@ def main():
                 globals()["_uid_"] = {}
 
                 if not server_links:
-                    print("\033[1;31m[ Shouko.dev ] - No game ID link set up.\033[0m")
+                    print("\033[1;31m[ Shako.dev ] - No game ID link set up.\033[0m")
                     input("\033[1;32mPress Enter to return...\033[0m")
                     continue
 
-                force_rejoin_input = input("\033[1;93m[ Shouko.dev ] - Force rejoin interval (minutes, 'q' to skip): \033[0m")
+                force_rejoin_input = input("\033[1;93m[ Shako.dev ] - Force rejoin interval (minutes, 'q' to skip): \033[0m")
                 force_rejoin_interval = float('inf') if force_rejoin_input.lower() == 'q' else int(force_rejoin_input) * 60
 
                 RobloxManager.kill_roblox_processes()
                 time.sleep(3)
 
-                print("\033[1;32m[ Shouko.dev ] - Starting background monitoring services...\033[0m")
+                print("\033[1;32m[ Shako.dev ] - Starting background monitoring services...\033[0m")
                 
                 tasks_to_start = [
                     (Runner.monitor_presence, (server_links, main_stop_event)),
@@ -1595,23 +1762,23 @@ def main():
                 Runner.launch_package_sequentially(server_links, package_monitors, main_stop_event)
                 globals()["is_runner_ez"] = True
 
-                print("\033[1;32m[ Shouko.dev ] - All initial launches complete. Continuous monitoring is now active.\033[0m")
+                print("\033[1;32m[ Shako.dev ] - All initial launches complete. Continuous monitoring is now active.\033[0m")
 
                 while not main_stop_event.is_set():
                     time.sleep(10)
                     Utilities.collect_garbage()
                 
-                print("\033[1;31m[ Shouko.dev ] - Monitoring has been stopped. Returning to main menu.\033[0m")
+                print("\033[1;31m[ Shako.dev ] - Monitoring has been stopped. Returning to main menu.\033[0m")
 
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error: {e}\033[0m")
                 Utilities.log_error(f"Error in main loop (1): {e}\n{traceback.format_exc()}")
                 input("\033[1;32mPress Enter to return...\033[0m")
                 continue
 
         elif setup_type == "2":
             try:
-                print("\033[1;32m[ Shouko.dev ] - Auto Setup User IDs from appStorage.json...\033[0m")
+                print("\033[1;32m[ Shako.dev ] - Auto Setup User IDs from appStorage.json...\033[0m")
                 packages = RobloxManager.get_roblox_packages()
                 accounts = []
 
@@ -1621,32 +1788,32 @@ def main():
                         user_id = FileManager.find_userid_from_file(file_path)
                         if user_id and user_id != "-1":
                             accounts.append((package_name, user_id))
-                            print(f"\033[96m[ Shouko.dev ] - Found UserId for {package_name}: {user_id}\033[0m")
+                            print(f"\033[96m[ Shako.dev ] - Found UserId for {package_name}: {user_id}\033[0m")
                         else:
-                            print(f"\033[1;31m[ Shouko.dev ] - UserId not found for {package_name}.\033[0m")
+                            print(f"\033[1;31m[ Shako.dev ] - UserId not found for {package_name}.\033[0m")
                     except Exception as e:
-                        print(f"\033[1;31m[ Shouko.dev ] - Error reading file for {package_name}: {e}\033[0m")
+                        print(f"\033[1;31m[ Shako.dev ] - Error reading file for {package_name}: {e}\033[0m")
                         Utilities.log_error(f"Error reading appStorage.json for {package_name}: {e}")
 
                 if accounts:
                     FileManager.save_accounts(accounts)
-                    print("\033[1;32m[ Shouko.dev ] - User IDs saved!\033[0m")
+                    print("\033[1;32m[ Shako.dev ] - User IDs saved!\033[0m")
                 else:
-                    print("\033[1;31m[ Shouko.dev ] - No User IDs found.\033[0m")
+                    print("\033[1;31m[ Shako.dev ] - No User IDs found.\033[0m")
                     input("\033[1;32mPress Enter to return...\033[0m")
                     continue
 
-                print("\033[93m[ Shouko.dev ] - Select game:\033[0m")
+                print("\033[93m[ Shako.dev ] - Select game:\033[0m")
                 games = [
-                    "1. Blox Fruits", "2. Pet Simulator 99", "3. Anime Defenders", "4. Fisch",
-                    "5. Brookhaven", "6. Sols RNG", "7. Type Soul",
-                    "8. Jujutsu Infinite", "9. Cursed Arena", "10. Dragon Adventures",
+                    "1. Blox Fruits", "2. Grow A Garden", "3. King Legacy", "4. Fisch",
+                    "5. Bee Swarm Simulator", "6. Anime Last Stand", "7. Dead Rails Alpha",
+                    "8. All Star Tower Defense X", "9. 99 Nights In The Forest", "10. Murder Mystery 2",
                     "11. Steal A Brainrot", "12. Blue Lock Rivals", "13. Arise Crossover", "14. Other game or Private Server Link"
                 ]
                 for game in games:
                     print(f"\033[96m{game}\033[0m")
 
-                choice = input("\033[93m[ Shouko.dev ] - Enter choice: \033[0m").strip()
+                choice = input("\033[93m[ Shako.dev ] - Enter choice: \033[0m").strip()
                 game_ids = {
                     "1": "2753915549", "2": "126884695634066", "3": "4520749081", "4": "16732694052",
                     "5": "1537690962", "6": "12886143095", "7": "116495829188952", "8": "17687504411",
@@ -1657,9 +1824,9 @@ def main():
                 if choice in game_ids:
                     server_link = game_ids[choice]
                 elif choice == "14":
-                    server_link = input("\033[93m[ Shouko.dev ] - Enter game ID or private server link: \033[0m")
+                    server_link = input("\033[93m[ Shako.dev ] - Enter game ID or private server link: \033[0m")
                 else:
-                    print("\033[1;31m[ Shouko.dev ] - Invalid choice.\033[0m")
+                    print("\033[1;31m[ Shako.dev ] - Invalid choice.\033[0m")
                     input("\033[1;32mPress Enter to return...\033[0m")
                     continue
 
@@ -1668,10 +1835,10 @@ def main():
                     server_links = [(package_name, formatted_link) for package_name, _ in accounts]
                     FileManager.save_server_links(server_links)
                 else:
-                    print("\033[1;31m[ Shouko.dev ] - Invalid server link.\033[0m")
+                    print("\033[1;31m[ Shako.dev ] - Invalid server link.\033[0m")
 
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error: {e}\033[0m")
                 Utilities.log_error(f"Setup error: {e}")
             
             input("\033[1;32mPress Enter to return...\033[0m")
@@ -1690,50 +1857,50 @@ def main():
         elif setup_type == "5":
             try:
                 print("\033[1;35m[1]\033[1;32m Executor Check\033[0m \033[1;35m[2]\033[1;36m Online Check\033[0m")
-                config_choice = input("\033[1;93m[ Shouko.dev ] - Select check method (1-2, 'q' to keep default): \033[0m").strip()
+                config_choice = input("\033[1;93m[ Shako.dev ] - Select check method (1-2, 'q' to keep default): \033[0m").strip()
 
                 if config_choice.lower() == "q":
                     globals()["check_exec_enable"] = "1"
                     globals()["lua_script_template"] = 'if not game:IsLoaded() then game.Loaded:Wait() end local f = tostring(game.Players.LocalPlayer.UserId)..".main" local c = "https://discord.gg/FcEGmkNDDe" local function w() local g = pcall(writefile, f, c) if not g then game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer) end end task.spawn(function() w() while true do task.wait(5) w() end end)'
-                    print("\033[1;32m[ Shouko.dev ] - Default set: Executor + Shouko Check\033[0m")
+                    print("\033[1;32m[ Shako.dev ] - Default set: Executor + Shako Check\033[0m")
                 elif config_choice == "1":
                     globals()["check_exec_enable"] = "1"
                     globals()["lua_script_template"] = 'if not game:IsLoaded() then game.Loaded:Wait() end local f = tostring(game.Players.LocalPlayer.UserId)..".main" local c = "https://discord.gg/FcEGmkNDDe" local function w() local g = pcall(writefile, f, c) if not g then game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer) end end task.spawn(function() w() while true do task.wait(5) w() end end)'
-                    print("\033[1;32m[ Shouko.dev ] - Set to Executor + Shouko Check\033[0m")
+                    print("\033[1;32m[ Shako.dev ] - Set to Executor + Shako Check\033[0m")
                 elif config_choice == "2":
                     globals()["check_exec_enable"] = "0"
                     globals()["lua_script_template"] = None
-                    print("\033[1;36m[ Shouko.dev ] - Set to Online Check.\033[0m")
+                    print("\033[1;36m[ Shako.dev ] - Set to Online Check.\033[0m")
                 else:
-                    print("\033[1;31m[ Shouko.dev ] - Invalid choice. Keeping default.\033[0m")
+                    print("\033[1;31m[ Shako.dev ] - Invalid choice. Keeping default.\033[0m")
                     globals()["check_exec_enable"] = "1"
                     globals()["lua_script_template"] = 'if not game:IsLoaded() then game.Loaded:Wait() end local f = tostring(game.Players.LocalPlayer.UserId)..".main" local c = "https://discord.gg/FcEGmkNDDe" local function w() local g = pcall(writefile, f, c) if not g then game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer) end end task.spawn(function() w() while true do task.wait(5) w() end end)'
 
-                config_file = os.path.join("Shouko.dev", "checkui.lua")
+                config_file = os.path.join("Shako.dev", "checkui.lua")
                 if globals()["lua_script_template"]:
                     try:
-                        os.makedirs("Shouko.dev", exist_ok=True)
+                        os.makedirs("Shako.dev", exist_ok=True)
                         with open(config_file, "w") as f:
                             f.write(globals()["lua_script_template"])
-                        print(f"\033[1;36m[ Shouko.dev ] - Script saved to {config_file}\033[0m")
+                        print(f"\033[1;36m[ Shako.dev ] - Script saved to {config_file}\033[0m")
                     except Exception as e:
-                        print(f"\033[1;31m[ Shouko.dev ] - Error saving script: {e}\033[0m")
+                        print(f"\033[1;31m[ Shako.dev ] - Error saving script: {e}\033[0m")
                         Utilities.log_error(f"Error saving script to {config_file}: {e}")
                 else:
                     if os.path.exists(config_file):
                         try:
                             os.remove(config_file)
-                            print(f"\033[1;36m[ Shouko.dev ] - Removed {config_file} for Online Check.\033[0m")
+                            print(f"\033[1;36m[ Shako.dev ] - Removed {config_file} for Online Check.\033[0m")
                         except Exception as e:
-                            print(f"\033[1;31m[ Shouko.dev ] - Error removing {config_file}: {e}\033[0m")
+                            print(f"\033[1;31m[ Shako.dev ] - Error removing {config_file}: {e}\033[0m")
                             Utilities.log_error(f"Error removing {config_file}: {e}")
 
                 globals()["command_8_configured"] = True
 
                 FileManager.save_config()
-                print("\033[1;32m[ Shouko.dev ] - Check method configuration saved.\033[0m")
+                print("\033[1;32m[ Shako.dev ] - Check method configuration saved.\033[0m")
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error setting up check method: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error setting up check method: {e}\033[0m")
                 Utilities.log_error(f"Check method setup error: {e}")
                 input("\033[1;32mPress Enter to return...\033[0m")
                 continue
@@ -1743,72 +1910,71 @@ def main():
         elif setup_type == "6":
             try:
                 current_prefix = globals().get("package_prefix", "com.roblox")
-                print(f"\033[1;32m[ Shouko.dev ] - Current package prefix: {current_prefix}\033[0m")
-                new_prefix = input("\033[1;93m[ Shouko.dev ] - Enter new package prefix (or press Enter to keep current): \033[0m").strip()
+                print(f"\033[1;32m[ Shako.dev ] - Current package prefix: {current_prefix}\033[0m")
+                new_prefix = input("\033[1;93m[ Shako.dev ] - Enter new package prefix (or press Enter to keep current): \033[0m").strip()
                 
                 if new_prefix:
                     globals()["package_prefix"] = new_prefix
                     FileManager.save_config()
-                    print(f"\033[1;32m[ Shouko.dev ] - Package prefix updated to: {new_prefix}\033[0m")
+                    print(f"\033[1;32m[ Shako.dev ] - Package prefix updated to: {new_prefix}\033[0m")
                 else:
-                    print(f"\033[1;33m[ Shouko.dev ] - Package prefix unchanged: {current_prefix}\033[0m")
+                    print("\033[1;33m[ Shako.dev ] - Keeping current prefix.\033[0m")
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error setting package prefix: {e}\033[0m")
-                Utilities.log_error(f"Error setting package prefix: {e}")
-                input("\033[1;32mPress Enter to return...\033[0m")
-                continue
+                print(f"\033[1;31m[ Shako.dev ] - Error: {e}\033[0m")
+                Utilities.log_error(f"Package prefix error: {e}")
             input("\033[1;32mPress Enter to return...\033[0m")
             continue
 
         elif setup_type == "7":
-            if not auto_android_id_enabled:
-                android_id = input("\033[1;93m[ Shouko.dev ] - Enter Android ID to spam set: \033[0m").strip()
-                if not android_id:
-                    print("\033[1;31m[ Shouko.dev ] - Android ID cannot be empty.\033[0m")
-                    input("\033[1;32mPress Enter to return...\033[0m")
-                    continue
-                auto_android_id_value = android_id
-                auto_android_id_enabled = True
-                if auto_android_id_thread is None or not auto_android_id_thread.is_alive():
-                    auto_android_id_thread = threading.Thread(target=auto_change_android_id, daemon=True)
-                    auto_android_id_thread.start()
-                print("\033[1;32m[ Shouko.dev ] - Auto change Android ID enabled.\033[0m")
-            else:
-                auto_android_id_enabled = False
-                print("\033[1;31m[ Shouko.dev ] - Auto change Android ID disabled.\033[0m")
+            try:
+                print("\033[1;35m[1]\033[1;32m Enable Auto Android ID\033[0m \033[1;35m[2]\033[1;31m Disable\033[0m")
+                choice = input("\033[1;93m[ Shako.dev ] - Select option: \033[0m").strip()
+                
+                if choice == "1":
+                    auto_android_id_value = input("\033[1;93m[ Shako.dev ] - Enter Android ID to set: \033[0m").strip()
+                    if auto_android_id_value:
+                        auto_android_id_enabled = True
+                        if auto_android_id_thread is None or not auto_android_id_thread.is_alive():
+                            auto_android_id_thread = threading.Thread(target=auto_change_android_id, daemon=True)
+                            auto_android_id_thread.start()
+                        print(f"\033[1;32m[ Shako.dev ] - Auto Android ID enabled with value: {auto_android_id_value}\033[0m")
+                    else:
+                        print("\033[1;31m[ Shako.dev ] - Invalid Android ID.\033[0m")
+                elif choice == "2":
+                    auto_android_id_enabled = False
+                    print("\033[1;31m[ Shako.dev ] - Auto Android ID disabled.\033[0m")
+                else:
+                    print("\033[1;31m[ Shako.dev ] - Invalid choice.\033[0m")
+            except Exception as e:
+                print(f"\033[1;31m[ Shako.dev ] - Error: {e}\033[0m")
+                Utilities.log_error(f"Android ID error: {e}")
             input("\033[1;32mPress Enter to return...\033[0m")
             continue
 
         elif setup_type == "8":
             try:
-                print("\033[1;32m[ Shouko.dev ] - Scanning for packages...\033[0m")
+                print("\033[1;32m[ Shako.dev ] - Launching all packages to main menu...\033[0m")
                 packages = RobloxManager.get_roblox_packages()
-                if not packages:
-                    print("\033[1;31m[ Shouko.dev ] - No Roblox packages found!\033[0m")
-                else:
-                    print(f"\033[1;32m[ Shouko.dev ] - Found {len(packages)} packages. Launching...\033[0m")
-                    for pkg in packages:
-                        print(f"\033[1;33m[ Shouko.dev ] - Launching {pkg}...\033[0m")
-                        subprocess.run(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        time.sleep(1.5)
-                    print("\033[1;32m[ Shouko.dev ] - All packages launched!\033[0m")
+                for package_name in packages:
+                    subprocess.run(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(f"\033[1;36m[ Shako.dev ] - Launched {package_name}\033[0m")
+                    time.sleep(2)
+                print("\033[1;32m[ Shako.dev ] - All packages launched.\033[0m")
             except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error: {e}\033[0m")
+                print(f"\033[1;31m[ Shako.dev ] - Error: {e}\033[0m")
+                Utilities.log_error(f"Launch all error: {e}")
             input("\033[1;32mPress Enter to return...\033[0m")
             continue
 
         elif setup_type == "9":
-            try:
-                Runner.logout_all_packages()
-            except Exception as e:
-                print(f"\033[1;31m[ Shouko.dev ] - Error: {e}\033[0m")
+            Runner.logout_all_packages()
+            input("\033[1;32mPress Enter to return...\033[0m")
+            continue
+
+        else:
+            print("\033[1;31m[ Shako.dev ] - Invalid command. Please try again.\033[0m")
             input("\033[1;32mPress Enter to return...\033[0m")
             continue
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\033[1;31m[ Shouko.dev ] - Error: {e}\033[0m")
-        Utilities.log_error(f"CRITICAL MAIN ERROR: {e}\n{traceback.format_exc()}")
-        raise
+    main()
