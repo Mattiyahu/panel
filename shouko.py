@@ -324,7 +324,7 @@ class FileManager:
             globals()['package_prefix'] = 'com.roblox'
             globals()['check_exec_enable'] = '1'
 
-@staticmethod
+    @staticmethod
     def get_roblox_packages():
         packages = []
         try:
