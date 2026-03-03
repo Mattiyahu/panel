@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
 🖥️ TITANIYAHU - Roblox AutoRejoin (Termux/ADB) 🖥️
-v5.2 - FIX: Roblox não abrindo + ping falso + logs de erro do am start
+v5.3 - FIX definitivo: monkey args + am start args (Roblox não abrindo)
 
-FULL (com ADB):
-- PID / CPU / RSS / force-stop / rejoin
-LITE (sem ADB):
-- ping/mem local + tenta reconectar ADB + abre VIP sem force-stop
-
-⚠️ Para CPU/RSS/force-stop funcionar, precisa ADB conectado.
+Principais mudanças:
+- NÃO usa mais "adb shell sh -c ..." para monkey/am start (isso engole args em alguns devices)
+- Usa "adb shell <cmd> <arg1> <arg2> ..." (lista de args) = confiável
 """
 
 from __future__ import annotations
@@ -25,9 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-
 APP_NAME = "TITANIYAHU"
-VERSION = "5.2"
+VERSION = "5.3"
 CONFIG_FILE = "titaniyahu_config.json"
 
 DEFAULT_CONFIG = {
@@ -40,9 +36,13 @@ DEFAULT_CONFIG = {
     "cooldown_time": 12,
     "warmup_time": 20,
 
-    "launch_wait_sec": 12,          # ⬅️ espera PID depois de abrir
-    "link_apply_wait_sec": 6,       # ⬅️ espera depois de aplicar link
-    "monkey_first": True,           # ⬅️ abre Roblox primeiro (recomendado)
+    "launch_wait_sec": 14,
+    "link_apply_wait_sec": 6,
+    "monkey_first": True,
+
+    "ping_enabled": True,
+    "internet_fail_time": 25,
+    "ping_host": "1.1.1.1",
 
     "low_cpu_threshold": 8.0,
     "max_lowcpu_time": 30,
@@ -52,9 +52,6 @@ DEFAULT_CONFIG = {
 
     "device_low_mem_mb": 350,
     "device_low_mem_time": 30,
-
-    "internet_fail_time": 25,
-    "ping_host": "1.1.1.1",
 
     "adb": {
         "serial": "",
@@ -68,6 +65,7 @@ DEFAULT_CONFIG = {
     "lite_open_vip_on_internet_return": False,
     "lite_open_vip_every_min": 0,
 }
+
 
 # =========================
 # 🎨 THEME/UI
@@ -156,6 +154,9 @@ class UI:
         print()
 
 
+# =========================
+# 🔧 Local shell (Termux)
+# =========================
 def local_shell(cmd: str, timeout: int = 18) -> Tuple[int, str, str]:
     try:
         p = subprocess.run(["sh", "-lc", cmd], capture_output=True, text=True, timeout=timeout)
@@ -166,6 +167,9 @@ def local_shell(cmd: str, timeout: int = 18) -> Tuple[int, str, str]:
         return 1, "", str(e)
 
 
+# =========================
+# 🔧 CONFIG IO
+# =========================
 def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if os.path.exists(CONFIG_FILE):
@@ -191,6 +195,9 @@ def save_config(cfg: dict) -> None:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
+# =========================
+# 📡 Webhook (opcional)
+# =========================
 def send_webhook(url: str, content: str) -> None:
     if not url:
         return
@@ -210,6 +217,9 @@ def send_webhook(url: str, content: str) -> None:
         return
 
 
+# =========================
+# 📱 ADB Wrapper (com shell args)
+# =========================
 class ADB:
     def __init__(self, adb_cfg: dict):
         self.cfg = adb_cfg or {}
@@ -221,7 +231,7 @@ class ADB:
             cmd += ["-s", serial]
         return cmd
 
-    def run(self, args: List[str], timeout: int = 12) -> Tuple[int, str, str]:
+    def run(self, args: List[str], timeout: int = 14) -> Tuple[int, str, str]:
         try:
             p = subprocess.run(self._base() + args, capture_output=True, text=True, timeout=timeout)
             return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
@@ -232,15 +242,13 @@ class ADB:
         except Exception as e:
             return 1, "", str(e)
 
-    def shell_rc(self, cmd: str, timeout: int = 12) -> Tuple[int, str, str]:
-        # importante: retorna stdout+stderr (pra gente ver erro do am start)
-        return self.run(["shell", "sh", "-c", cmd], timeout=timeout)
+    def shell_list(self, argv: List[str], timeout: int = 14) -> Tuple[int, str, str]:
+        """Executa: adb shell <argv...> (sem sh -c) => NÃO perde argumentos."""
+        return self.run(["shell"] + argv, timeout=timeout)
 
-    def shell(self, cmd: str, timeout: int = 12) -> str:
-        rc, out, err = self.shell_rc(cmd, timeout=timeout)
-        if rc != 0:
-            return ""
-        return out
+    def shell_sh(self, cmd: str, timeout: int = 14) -> Tuple[int, str, str]:
+        """Fallback para comandos que precisam de shell."""
+        return self.run(["shell", "sh", "-c", cmd], timeout=timeout)
 
     def devices(self) -> str:
         rc, out, err = self.run(["devices"], timeout=10)
@@ -257,15 +265,6 @@ class ADB:
         rc, out, err = self.run(["connect", target], timeout=12)
         txt = (out + "\n" + err).lower()
         return rc == 0 and ("connected" in txt or "already connected" in txt)
-
-    def pair(self, target: str, code: str) -> bool:
-        target = (target or "").strip()
-        code = (code or "").strip()
-        if not target or not code:
-            return False
-        rc, out, err = self.run(["pair", target, code], timeout=18)
-        txt = (out + "\n" + err).lower()
-        return rc == 0 and ("success" in txt or "paired" in txt)
 
     def is_connected(self) -> bool:
         out = self.devices()
@@ -287,45 +286,15 @@ class ADB:
         return self.is_connected()
 
 
-def parse_meminfo(meminfo: str) -> Tuple[Optional[int], Optional[int]]:
-    total_kb = None
-    avail_kb = None
-    for line in meminfo.splitlines():
-        if line.startswith("MemTotal:"):
-            m = re.findall(r"\d+", line)
-            if m:
-                total_kb = int(m[0])
-        if line.startswith("MemAvailable:"):
-            m = re.findall(r"\d+", line)
-            if m:
-                avail_kb = int(m[0])
-    if total_kb is None:
-        return None, None
-    total_mb = total_kb // 1024
-    avail_mb = (avail_kb // 1024) if avail_kb is not None else None
-    return total_mb, avail_mb
-
-
-def parse_vmrss_kb(status_txt: str) -> Optional[int]:
-    for line in status_txt.splitlines():
-        if line.startswith("VmRSS:"):
-            nums = re.findall(r"\d+", line)
-            if nums:
-                return int(nums[0])
-    return None
-
-
-def safe_float(s: str, default: float = 0.0) -> float:
-    try:
-        return float(s)
-    except Exception:
-        return default
-
-
+# =========================
+# 📦 Detect packages (ADB or Termux)
+# =========================
 def detect_roblox_packages(adb: ADB) -> List[str]:
     out = ""
     if adb.ensure():
-        out = adb.shell("pm list packages -3", timeout=18)
+        rc, out, err = adb.shell_list(["pm", "list", "packages", "-3"], timeout=18)
+        if rc != 0:
+            out = ""
     if not out:
         _, out, _ = local_shell("pm list packages -3", timeout=18)
 
@@ -341,6 +310,38 @@ def detect_roblox_packages(adb: ADB) -> List[str]:
     return sorted(set(pkgs))
 
 
+# =========================
+# 📊 Helpers
+# =========================
+def parse_meminfo(meminfo: str) -> Tuple[Optional[int], Optional[int]]:
+    total_kb = None
+    avail_kb = None
+    for line in meminfo.splitlines():
+        if line.startswith("MemTotal:"):
+            m = re.findall(r"\d+", line)
+            if m:
+                total_kb = int(m[0])
+        if line.startswith("MemAvailable:"):
+            m = re.findall(r"\d+", line)
+            if m:
+                avail_kb = int(m[0])
+    if total_kb is None:
+        return None, None
+    return total_kb // 1024, (avail_kb // 1024) if avail_kb is not None else None
+
+
+def parse_vmrss_kb(status_txt: str) -> Optional[int]:
+    for line in status_txt.splitlines():
+        if line.startswith("VmRSS:"):
+            nums = re.findall(r"\d+", line)
+            if nums:
+                return int(nums[0])
+    return None
+
+
+# =========================
+# 🧠 Estado por pacote
+# =========================
 @dataclass
 class ProcSample:
     last_proc_jiffies: int = 0
@@ -352,6 +353,9 @@ class ProcSample:
     cooldown_until: float = 0.0
 
 
+# =========================
+# 🎮 Monitor
+# =========================
 class TitaniyahuMonitor:
     def __init__(self, cfg: dict, adb: ADB):
         self.cfg = cfg
@@ -361,9 +365,6 @@ class TitaniyahuMonitor:
 
         self.internet_fail_seconds = 0
         self.low_mem_seconds = 0
-        self.last_lite_open_ts = 0.0
-
-        self._ping_supported: Optional[bool] = None
 
         signal.signal(signal.SIGINT, self._sig)
         signal.signal(signal.SIGTERM, self._sig)
@@ -372,70 +373,57 @@ class TitaniyahuMonitor:
         UI.log("SYSTEM", "Interrupção detectada • encerrando...", "WARN")
         self.running = False
 
-    # ------------------ NET ------------------
-    def _check_ping_supported(self) -> bool:
-        if self._ping_supported is not None:
-            return self._ping_supported
-        # testa se existe "ping" no ambiente (ADB ou local)
+    # ---------- NET / MEM ----------
+    def device_mem(self) -> Tuple[Optional[int], Optional[int]]:
         if self.adb.ensure():
-            rc, out, err = self.adb.shell_rc("command -v ping >/dev/null 2>&1; echo $?", timeout=6)
-            ok = ("0" in (out.strip() or ""))
-            self._ping_supported = ok
-            if not ok:
-                UI.log("NET", "ping não disponível no shell via ADB (vou ignorar checagem de ping)", "WARN")
-            return ok
-        rc, out, _ = local_shell("command -v ping >/dev/null 2>&1; echo $?", timeout=6)
-        ok = ("0" in (out.strip() or ""))
-        self._ping_supported = ok
-        if not ok:
-            UI.log("NET", "ping não disponível (vou ignorar checagem de ping)", "WARN")
-        return ok
+            rc, out, err = self.adb.shell_list(["cat", "/proc/meminfo"], timeout=8)
+            if rc == 0 and out:
+                return parse_meminfo(out)
+        _, out, _ = local_shell("cat /proc/meminfo", timeout=8)
+        return parse_meminfo(out)
 
     def internet_ok(self) -> Optional[bool]:
-        # retorna True/False ou None = "não sei" (não penaliza)
-        if not self._check_ping_supported():
+        if not self.cfg.get("ping_enabled", True):
             return None
-
         host = str(self.cfg.get("ping_host", "1.1.1.1")).strip() or "1.1.1.1"
-        cmds = (f"ping -c 1 -W 2 {host}", f"ping -c 1 -w 2 {host}", f"ping -c 1 {host}")
 
+        # tenta ping via ADB (preferível)
         if self.adb.ensure():
-            for c in cmds:
-                rc, out, err = self.adb.shell_rc(c, timeout=6)
+            for argv in (["ping", "-c", "1", "-W", "2", host],
+                         ["ping", "-c", "1", "-w", "2", host],
+                         ["ping", "-c", "1", host]):
+                rc, out, err = self.adb.shell_list(argv, timeout=8)
                 txt = (out + "\n" + err).lower()
+                if "not found" in txt or "inaccessible" in txt:
+                    return None
                 if ("bytes from" in txt and "time=" in txt) or ("1 received" in txt) or ("1 packets received" in txt):
                     return True
             return False
 
-        for c in cmds:
-            rc, out, err = local_shell(c, timeout=6)
+        # fallback local
+        for cmd in (f"ping -c 1 -W 2 {host}", f"ping -c 1 -w 2 {host}", f"ping -c 1 {host}"):
+            rc, out, err = local_shell(cmd, timeout=8)
             txt = (out + "\n" + err).lower()
+            if "not found" in txt:
+                return None
             if ("bytes from" in txt and "time=" in txt) or ("1 received" in txt) or ("1 packets received" in txt):
                 return True
         return False
 
-    # ------------------ MEM ------------------
-    def device_mem(self) -> Tuple[Optional[int], Optional[int]]:
-        if self.adb.ensure():
-            mem = self.adb.shell("cat /proc/meminfo", timeout=6)
-            return parse_meminfo(mem)
-        _, mem, _ = local_shell("cat /proc/meminfo", timeout=6)
-        return parse_meminfo(mem)
-
-    # ------------------ FULL metrics ------------------
+    # ---------- FULL metrics ----------
     def get_pid(self, package: str) -> Optional[str]:
         if not self.adb.ensure():
             return None
-        pid = self.adb.shell(f"pidof {package}", timeout=6).strip()
-        if not pid:
+        rc, out, err = self.adb.shell_list(["pidof", package], timeout=8)
+        if rc != 0 or not out:
             return None
-        return pid.split()[0]
+        return out.strip().split()[0]
 
     def read_total_jiffies(self) -> int:
-        txt = self.adb.shell("cat /proc/stat", timeout=6)
-        if not txt:
+        rc, out, err = self.adb.shell_list(["cat", "/proc/stat"], timeout=8)
+        if rc != 0 or not out:
             return 0
-        parts = txt.splitlines()[0].split()
+        parts = out.splitlines()[0].split()
         nums = []
         for x in parts[1:]:
             try:
@@ -445,8 +433,10 @@ class TitaniyahuMonitor:
         return sum(nums) if nums else 0
 
     def read_proc_jiffies(self, pid: str) -> int:
-        stat = self.adb.shell(f"cat /proc/{pid}/stat", timeout=6)
-        parts = stat.split()
+        rc, out, err = self.adb.shell_list(["cat", f"/proc/{pid}/stat"], timeout=8)
+        if rc != 0 or not out:
+            return 0
+        parts = out.split()
         if len(parts) < 16:
             return 0
         try:
@@ -475,11 +465,13 @@ class TitaniyahuMonitor:
         return max(0.0, min(100.0, (dp / dt) * 100.0))
 
     def rss_mb(self, pid: str) -> float:
-        status_txt = self.adb.shell(f"cat /proc/{pid}/status", timeout=6)
-        kb = parse_vmrss_kb(status_txt)
+        rc, out, err = self.adb.shell_list(["cat", f"/proc/{pid}/status"], timeout=8)
+        if rc != 0 or not out:
+            return 0.0
+        kb = parse_vmrss_kb(out)
         return (kb / 1024.0) if kb else 0.0
 
-    # ------------------ ACTIONS ------------------
+    # ---------- Launch / VIP ----------
     def choose_vip_link(self) -> str:
         links = self.cfg.get("vip_links") or []
         if isinstance(links, str):
@@ -499,73 +491,96 @@ class TitaniyahuMonitor:
         return None
 
     def open_app_monkey(self, package: str) -> Tuple[bool, str]:
-        # abre o app pela intent LAUNCHER (bem mais confiável)
-        rc, out, err = self.adb.shell_rc(
-            f"monkey -p {package} -c android.intent.category.LAUNCHER 1",
-            timeout=12
+        # ✅ Agora com args list => NÃO perde parâmetros
+        rc, out, err = self.adb.shell_list(
+            ["monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"],
+            timeout=14
         )
         txt = (out + "\n" + err).strip()
-        ok = rc == 0
+        ok = (rc == 0) and ("events injected" in txt.lower() or "allowpackage" in txt.lower() or "monkey finished" in txt.lower() or txt != "")
+        return ok, txt
+
+    def open_app_launcher(self, package: str) -> Tuple[bool, str]:
+        # fallback: tenta MAIN/LAUNCHER direto
+        rc, out, err = self.adb.shell_list(
+            ["am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", package],
+            timeout=14
+        )
+        txt = (out + "\n" + err).strip()
+        ok = (rc == 0) and ("error" not in txt.lower())
         return ok, txt
 
     def apply_link(self, package: str, link: str) -> Tuple[bool, str]:
-        # 1) tenta VIEW sem -p (deixa sistema resolver, universal link)
-        rc1, out1, err1 = self.adb.shell_rc(
-            f"am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d '{link}'",
-            timeout=14
+        # ✅ args list (link é um argumento só, não quebra)
+        rc1, out1, err1 = self.adb.shell_list(
+            ["am", "start", "-a", "android.intent.action.VIEW", "-c", "android.intent.category.BROWSABLE", "-d", link],
+            timeout=18
         )
-        txt1 = (out1 + "\n" + err1).strip()
-
-        # 2) tenta VIEW com -p (se tiver intent filter)
-        rc2, out2, err2 = self.adb.shell_rc(
-            f"am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d '{link}' -p {package}",
-            timeout=14
+        rc2, out2, err2 = self.adb.shell_list(
+            ["am", "start", "-a", "android.intent.action.VIEW", "-c", "android.intent.category.BROWSABLE", "-d", link, "-p", package],
+            timeout=18
         )
-        txt2 = (out2 + "\n" + err2).strip()
-
+        txt = (
+            "[VIEW sem -p]\n" + ((out1 + "\n" + err1).strip() or "(vazio)") +
+            "\n\n[VIEW com -p]\n" + ((out2 + "\n" + err2).strip() or "(vazio)")
+        )
         ok = (rc1 == 0) or (rc2 == 0)
-        combined = ("[VIEW no -p]\n" + (txt1 or "(vazio)") + "\n\n[VIEW com -p]\n" + (txt2 or "(vazio)"))
-        return ok, combined
+        return ok, txt
 
     def open_vip(self, package: str) -> bool:
         link = self.choose_vip_link()
 
         if not self.adb.ensure():
-            # LITE local: tenta abrir
+            # LITE local
             rc, out, err = local_shell(
                 f"am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d '{link}' -p {package}",
                 timeout=14
             )
             return rc == 0 and ("error" not in (out + err).lower())
 
-        # FULL:
+        # FULL: abrir app primeiro (monkey ou launcher)
         if self.cfg.get("monkey_first", True):
             ok, txt = self.open_app_monkey(package)
             if not ok:
-                UI.log(package, f"monkey falhou:\n{txt}", "ERROR")
+                UI.log(package, "monkey falhou — vou tentar launcher", "WARN")
+                UI.box("MONKEY DEBUG", txt or "(vazio)")
+                ok2, txt2 = self.open_app_launcher(package)
+                if not ok2:
+                    UI.log(package, "launcher também falhou", "ERROR")
+                    UI.box("LAUNCHER DEBUG", txt2 or "(vazio)")
+                else:
+                    UI.log(package, "App aberto (launcher)", "SUCCESS")
             else:
                 UI.log(package, "App aberto (monkey)", "SUCCESS")
-
-            pid = self.wait_pid(package, int(self.cfg.get("launch_wait_sec", 12)))
-            if not pid:
-                UI.log(package, "Não consegui PID após abrir app (monkey).", "ERROR")
-                # mesmo assim tenta aplicar link
+        else:
+            ok2, txt2 = self.open_app_launcher(package)
+            if not ok2:
+                UI.log(package, "launcher falhou", "ERROR")
+                UI.box("LAUNCHER DEBUG", txt2 or "(vazio)")
             else:
-                UI.log(package, f"PID detectado: {pid}", "INFO")
+                UI.log(package, "App aberto (launcher)", "SUCCESS")
 
+        # espera PID
+        pid = self.wait_pid(package, int(self.cfg.get("launch_wait_sec", 14)))
+        if pid:
+            UI.log(package, f"PID detectado: {pid}", "INFO")
+        else:
+            UI.log(package, "Sem PID após abrir app (mesmo assim vou aplicar link).", "WARN")
+
+        # aplica link
         ok_link, debug_txt = self.apply_link(package, link)
         if not ok_link:
-            UI.log(package, "am start do link falhou (vou mostrar debug abaixo)", "ERROR")
+            UI.log(package, "Aplicação do link falhou (debug abaixo)", "ERROR")
             UI.box("AM START DEBUG", debug_txt)
 
         time.sleep(int(self.cfg.get("link_apply_wait_sec", 6)))
-        pid2 = self.wait_pid(package, int(self.cfg.get("launch_wait_sec", 12)))
+        pid2 = self.wait_pid(package, int(self.cfg.get("launch_wait_sec", 14)))
         return pid2 is not None
 
     def force_stop(self, package: str) -> bool:
         if not self.adb.ensure():
             return False
-        self.adb.shell_rc(f"am force-stop {package}", timeout=10)
+        self.adb.shell_list(["am", "force-stop", package], timeout=12)
         time.sleep(0.3)
         return True
 
@@ -597,11 +612,11 @@ class TitaniyahuMonitor:
             UI.log(package, "Rejoin OK", "SUCCESS")
             send_webhook(self.cfg.get("webhook_url", ""), f"✅ {package} rejoin OK • motivo: {reason}")
         else:
-            UI.log(package, "Rejoin pode ter falhado (sem PID)", "ERROR")
+            UI.log(package, "Rejoin falhou (sem PID)", "ERROR")
             send_webhook(self.cfg.get("webhook_url", ""), f"❌ {package} rejoin falhou • motivo: {reason}")
         return ok
 
-    # ------------------ RULES ------------------
+    # ---------- RULES ----------
     def should_ignore_rules(self, package: str) -> bool:
         warm = int(self.cfg.get("warmup_time", 20))
         sample = self.samples.setdefault(package, ProcSample())
@@ -640,9 +655,8 @@ class TitaniyahuMonitor:
             self.soft_restart(package, f"RSS baixo {sample.lowrss_seconds}s ({rss:.0f}MB)")
             return
 
-        # só penaliza internet se a checagem for confiável (inet != None)
         if inet is False and self.internet_fail_seconds >= int(self.cfg.get("internet_fail_time", 25)):
-            self.soft_restart(package, "internet sem ping (rejoin)")
+            self.soft_restart(package, "internet sem ping")
             return
 
         if avail_mem_mb is not None and avail_mem_mb <= int(self.cfg.get("device_low_mem_mb", 350)) \
@@ -654,25 +668,19 @@ class TitaniyahuMonitor:
         rss_color = Theme.CYAN if rss >= float(self.cfg.get("min_rss_mb", 60)) else Theme.YELLOW
         UI.log(package, f"OK • CPU {cpu_color}{cpu:.1f}%{Theme.RESET}{Theme.GREEN_LIGHT} • RSS {rss_color}{rss:.0f}MB{Theme.RESET}", "SUCCESS")
 
-    def tick_package_lite(self, package: str) -> None:
-        UI.log(package, "LITE • sem métricas do processo (conecte ADB p/ FULL)", "WARN")
-
-    # ------------------ LOOP ------------------
     def monitor_loop(self) -> None:
         UI.banner()
         pkgs = self.cfg.get("packages") or []
         interval = int(self.cfg.get("check_interval", 10))
-
         if not pkgs:
-            UI.log("SYSTEM", "Nenhum pacote configurado. Use Detectar Pacotes.", "ERROR")
+            UI.log("SYSTEM", "Nenhum pacote configurado. Use --detect.", "ERROR")
             return
 
         UI.box("CONFIG", "\n".join([
             f"Intervalo: {interval}s | Cooldown: {self.cfg.get('cooldown_time')}s | Warmup: {self.cfg.get('warmup_time')}s",
             f"monkey_first: {self.cfg.get('monkey_first', True)} | launch_wait: {self.cfg.get('launch_wait_sec')}s | link_wait: {self.cfg.get('link_apply_wait_sec')}s",
-            f"Ping host: {self.cfg.get('ping_host')} (ping_supported será detectado)",
-            f"ADB auto_connect: {self.cfg.get('adb', {}).get('auto_connect', True)}",
-            f"ADB connect_target: {self.cfg.get('adb', {}).get('connect_target', '') or '(vazio)'}",
+            f"Ping: {'ON' if self.cfg.get('ping_enabled', True) else 'OFF'} | host: {self.cfg.get('ping_host')}",
+            f"ADB auto_connect: {self.cfg.get('adb', {}).get('auto_connect', True)} | connect_target: {self.cfg.get('adb', {}).get('connect_target') or '(vazio)'}",
             f"Pacotes: {len(pkgs)}",
         ]))
 
@@ -694,9 +702,8 @@ class TitaniyahuMonitor:
             total_mb, avail_mb = self.device_mem()
             inet = self.internet_ok()
 
-            # NET status
             if inet is None:
-                UI.log("NET", "Checagem de ping indisponível • ignorando regra de internet", "WARN")
+                UI.log("NET", "Ping indisponível/disabled • ignorando regra de internet", "WARN")
                 self.internet_fail_seconds = 0
             elif inet is False:
                 self.internet_fail_seconds += interval
@@ -706,7 +713,6 @@ class TitaniyahuMonitor:
                     UI.log("NET", "Ping OK (internet voltou)", "SUCCESS")
                 self.internet_fail_seconds = 0
 
-            # MEM status
             if avail_mb is not None and avail_mb <= int(self.cfg.get("device_low_mem_mb", 350)):
                 self.low_mem_seconds += interval
                 UI.log("MEM", f"Memória baixa: {avail_mb}MB livres ({self.low_mem_seconds}s)", "WARN")
@@ -717,12 +723,11 @@ class TitaniyahuMonitor:
 
             if not adb_ok:
                 UI.log("ADB", "OFFLINE • tentando reconectar automaticamente...", "WARN")
-
-            for p in pkgs:
-                if adb_ok:
+                for p in pkgs:
+                    UI.log(p, "LITE • conecte ADB para PID/CPU/RSS/force-stop", "WARN")
+            else:
+                for p in pkgs:
                     self.tick_package_full(p, interval=interval, inet=inet, avail_mem_mb=avail_mb)
-                else:
-                    self.tick_package_lite(p)
 
             for s in range(interval, 0, -1):
                 warn = s <= 3
@@ -733,189 +738,22 @@ class TitaniyahuMonitor:
             print()
 
 
-def setup_wizard(cfg: dict) -> dict:
-    UI.banner()
-    UI.log("WIZARD", "Configuração rápida", "INFO")
-
-    adb_cfg = cfg.get("adb", {})
-    UI.box("ADB", "\n".join([
-        f"serial: {adb_cfg.get('serial') or '(vazio)'}",
-        f"auto_connect: {adb_cfg.get('auto_connect', True)}",
-        f"connect_target: {adb_cfg.get('connect_target') or '(vazio)'}",
-        f"pair_target: {adb_cfg.get('pair_target') or '(vazio)'}",
-    ]))
-
-    s = input(f"{Theme.GREEN_LIGHT}ADB serial (Enter p/ manter): {Theme.RESET}").strip()
-    if s:
-        adb_cfg["serial"] = s
-
-    ac = input(f"{Theme.GREEN_LIGHT}Auto conectar ADB? (s/n) [{ 's' if adb_cfg.get('auto_connect', True) else 'n' }]: {Theme.RESET}").strip().lower()
-    if ac in ("s", "n"):
-        adb_cfg["auto_connect"] = (ac == "s")
-
-    ct = input(f"{Theme.GREEN_LIGHT}ADB connect_target (ex 127.0.0.1:5555) (Enter p/ manter): {Theme.RESET}").strip()
-    if ct:
-        adb_cfg["connect_target"] = ct
-
-    pt = input(f"{Theme.GREEN_LIGHT}ADB pair_target (ex 127.0.0.1:37123) (Enter p/ manter): {Theme.RESET}").strip()
-    if pt:
-        adb_cfg["pair_target"] = pt
-
-    cfg["adb"] = adb_cfg
-    adb = ADB(cfg["adb"])
-
-    if adb_cfg.get("pair_target") and input(f"\n{Theme.GREEN_LIGHT}Parear agora? (s/n): {Theme.RESET}").lower().startswith("s"):
-        code = input(f"{Theme.GREEN_LIGHT}Código de pareamento: {Theme.RESET}").strip()
-        UI.spinner("Pareando...", 1.0)
-        ok = adb.pair(adb_cfg["pair_target"], code)
-        UI.log("ADB", "Pareamento OK" if ok else "Pareamento falhou", "SUCCESS" if ok else "ERROR")
-
-    if adb_cfg.get("connect_target") and input(f"\n{Theme.GREEN_LIGHT}Conectar agora? (s/n): {Theme.RESET}").lower().startswith("s"):
-        UI.spinner("Conectando...", 1.0)
-        ok = adb.connect(adb_cfg["connect_target"])
-        UI.log("ADB", "Conectado" if ok else "Falhou conectar", "SUCCESS" if ok else "ERROR")
-        UI.box("ADB DEVICES", adb.devices())
-
-    # VIP links
-    print(f"\n{Theme.INFO}Links VIP/Private Server (1 por linha). Vazio = manter.{Theme.RESET}")
-    print(f"{Theme.DIM}Finalize com 'FIM'.{Theme.RESET}")
-    new_links: List[str] = []
-    while True:
-        line = input(f"{Theme.GREEN_LIGHT}link> {Theme.RESET}").strip()
-        if not line:
-            if not new_links:
-                break
-            continue
-        if line.upper() == "FIM":
-            break
-        new_links.append(line)
-    if new_links:
-        cfg["vip_links"] = new_links
-
-    # opts do launch
-    mf = input(f"{Theme.GREEN_LIGHT}Abrir Roblox via monkey antes do link? (s/n) [{ 's' if cfg.get('monkey_first', True) else 'n' }]: {Theme.RESET}").strip().lower()
-    if mf in ("s", "n"):
-        cfg["monkey_first"] = (mf == "s")
-
-    lw = input(f"{Theme.GREEN_LIGHT}Esperar PID (launch_wait_sec) [{cfg.get('launch_wait_sec')}]: {Theme.RESET}").strip()
-    if lw:
-        try: cfg["launch_wait_sec"] = int(lw)
-        except: pass
-
-    aw = input(f"{Theme.GREEN_LIGHT}Esperar após aplicar link (link_apply_wait_sec) [{cfg.get('link_apply_wait_sec')}]: {Theme.RESET}").strip()
-    if aw:
-        try: cfg["link_apply_wait_sec"] = int(aw)
-        except: pass
-
-    ph = input(f"{Theme.GREEN_LIGHT}Host p/ ping [{cfg.get('ping_host')}]: {Theme.RESET}").strip()
-    if ph:
-        cfg["ping_host"] = ph
-
-    if input(f"\n{Theme.GREEN_LIGHT}Detectar pacotes Roblox agora? (s/n): {Theme.RESET}").lower().startswith("s"):
-        UI.spinner("Detectando pacotes...", 0.8)
-        pkgs = detect_roblox_packages(adb)
-        if pkgs:
-            cfg["packages"] = pkgs
-            UI.box("PACOTES", "\n".join(pkgs))
-            UI.log("WIZARD", f"{len(pkgs)} pacotes salvos", "SUCCESS")
-        else:
-            UI.log("WIZARD", "Nenhum pacote Roblox encontrado", "ERROR")
-
-    save_config(cfg)
-    UI.log("CONFIG", "Configuração salva", "SUCCESS")
-    return cfg
-
-
-def interactive_menu(cfg: dict) -> None:
-    while True:
-        adb = ADB(cfg.get("adb", {}))
-        UI.banner()
-
-        pkgs = cfg.get("packages") or []
-        UI.box("STATUS", "\n".join([
-            f"ADB: {'OK' if adb.is_connected() else 'OFF'} | auto_connect: {cfg.get('adb',{}).get('auto_connect',True)}",
-            f"connect_target: {cfg.get('adb',{}).get('connect_target') or '(vazio)'}",
-            f"Pacotes: {len(pkgs)}",
-            f"Ping host: {cfg.get('ping_host')}",
-        ]))
-
-        print(f"{Theme.GREEN_DARK}┌─[{Theme.CYAN}MENU{Theme.GREEN_DARK}]─{'─'*54}┐{Theme.RESET}")
-        print(f"{Theme.GREEN_DARK}│ {Theme.CYAN}1{Theme.GREEN_DARK} {Theme.SYMBOLS['pointer']} {Theme.GREEN_LIGHT}Iniciar monitoramento{Theme.RESET}")
-        print(f"{Theme.GREEN_DARK}│ {Theme.CYAN}2{Theme.GREEN_DARK} {Theme.SYMBOLS['pointer']} {Theme.GREEN_LIGHT}Configurar (wizard){Theme.RESET}")
-        print(f"{Theme.GREEN_DARK}│ {Theme.CYAN}3{Theme.GREEN_DARK} {Theme.SYMBOLS['pointer']} {Theme.GREEN_LIGHT}Detectar pacotes Roblox (SEM ADB também){Theme.RESET}")
-        print(f"{Theme.GREEN_DARK}│ {Theme.CYAN}4{Theme.GREEN_DARK} {Theme.SYMBOLS['pointer']} {Theme.GREEN_LIGHT}ADB devices{Theme.RESET}")
-        print(f"{Theme.GREEN_DARK}│ {Theme.CYAN}5{Theme.GREEN_DARK} {Theme.SYMBOLS['pointer']} {Theme.GREEN_LIGHT}Executar tudo (auto){Theme.RESET}")
-        print(f"{Theme.GREEN_DARK}│ {Theme.CYAN}6{Theme.GREEN_DARK} {Theme.SYMBOLS['pointer']} {Theme.RED}Sair{Theme.RESET}")
-        print(f"{Theme.GREEN_DARK}└{'─'*60}┘{Theme.RESET}")
-
-        ch = input(f"\n{Theme.CYAN}{Theme.SYMBOLS['terminal']} {Theme.BOLD}Escolha (1-6): {Theme.RESET}").strip()
-
-        if ch == "1":
-            if not pkgs:
-                UI.log("SYSTEM", "Nenhum pacote configurado. Use Detectar Pacotes.", "ERROR")
-                input(f"{Theme.GREEN_LIGHT}Enter...{Theme.RESET}")
-                continue
-            TitaniyahuMonitor(cfg, adb).monitor_loop()
-            input(f"{Theme.GREEN_LIGHT}Enter...{Theme.RESET}")
-
-        elif ch == "2":
-            cfg = setup_wizard(cfg)
-            input(f"{Theme.GREEN_LIGHT}Enter...{Theme.RESET}")
-
-        elif ch == "3":
-            UI.spinner("Detectando pacotes...", 0.8)
-            pkgs = detect_roblox_packages(adb)
-            if pkgs:
-                cfg["packages"] = pkgs
-                save_config(cfg)
-                UI.box("PACOTES", "\n".join(pkgs))
-                UI.log("SYSTEM", f"{len(pkgs)} pacotes salvos", "SUCCESS")
-            else:
-                UI.log("SYSTEM", "Nenhum pacote Roblox encontrado", "ERROR")
-            input(f"{Theme.GREEN_LIGHT}Enter...{Theme.RESET}")
-
-        elif ch == "4":
-            UI.box("ADB DEVICES", adb.devices())
-            input(f"{Theme.GREEN_LIGHT}Enter...{Theme.RESET}")
-
-        elif ch == "5":
-            UI.spinner("Detectando pacotes...", 0.8)
-            pkgs = detect_roblox_packages(adb)
-            if pkgs:
-                cfg["packages"] = pkgs
-                save_config(cfg)
-                UI.log("AUTO", f"{len(pkgs)} pacotes detectados e salvos", "SUCCESS")
-                TitaniyahuMonitor(cfg, ADB(cfg.get("adb", {}))).monitor_loop()
-            else:
-                UI.log("AUTO", "Nenhum pacote Roblox detectado", "ERROR")
-            input(f"{Theme.GREEN_LIGHT}Enter...{Theme.RESET}")
-
-        elif ch == "6":
-            UI.log("SYSTEM", "Encerrando. Até mais!", "SUCCESS")
-            sys.exit(0)
-
-        else:
-            UI.log("INPUT", "Opção inválida", "ERROR")
-            time.sleep(1)
-
-
+# =========================
+# CLI
+# =========================
 def parse_args():
     p = argparse.ArgumentParser(prog="titaniyahu", add_help=True)
     p.add_argument("--auto", action="store_true", help="Detecta pacotes e inicia monitoramento.")
     p.add_argument("--monitor", action="store_true", help="Inicia monitoramento com pacotes do config.")
     p.add_argument("--detect", action="store_true", help="Detecta pacotes Roblox e salva no config.")
-    p.add_argument("--config", action="store_true", help="Abre wizard.")
     return p.parse_args()
 
 
 def main():
     cfg = load_config()
-    args = parse_args()
     adb = ADB(cfg.get("adb", {}))
+    args = parse_args()
 
-    if args.config:
-        setup_wizard(cfg)
-        return
     if args.detect:
         pkgs = detect_roblox_packages(adb)
         if pkgs:
@@ -927,6 +765,7 @@ def main():
         else:
             UI.log("SYSTEM", "Nenhum pacote Roblox encontrado", "ERROR")
         return
+
     if args.auto:
         pkgs = detect_roblox_packages(adb)
         if not pkgs:
@@ -934,16 +773,19 @@ def main():
             return
         cfg["packages"] = pkgs
         save_config(cfg)
-        TitaniyahuMonitor(cfg, ADB(cfg.get("adb", {}))).monitor_loop()
-        return
-    if args.monitor:
-        if not cfg.get("packages"):
-            UI.log("SYSTEM", "Config sem pacotes. Rode --detect ou --auto.", "ERROR")
-            return
-        TitaniyahuMonitor(cfg, ADB(cfg.get("adb", {}))).monitor_loop()
+        TitaniyahuMonitor(cfg, adb).monitor_loop()
         return
 
-    interactive_menu(cfg)
+    if args.monitor:
+        if not cfg.get("packages"):
+            UI.log("SYSTEM", "Sem pacotes no config. Rode --detect.", "ERROR")
+            return
+        TitaniyahuMonitor(cfg, adb).monitor_loop()
+        return
+
+    # default
+    UI.banner()
+    UI.log("DICA", "Use: python titaniyahu.py --auto", "INFO")
 
 
 if __name__ == "__main__":
