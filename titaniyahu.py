@@ -584,16 +584,34 @@ class TitaniyahuMonitor:
 # =========================
 # 🧭 Wizard / Menu
 # =========================
+def _local_shell(cmd: str, timeout: int = 18) -> str:
+    try:
+        p = subprocess.run(["sh", "-lc", cmd], capture_output=True, text=True, timeout=timeout)
+        return (p.stdout or "").strip()
+    except Exception:
+        return ""
+
 def detect_roblox_packages(adb: ADB) -> List[str]:
-    out = adb.shell("pm list packages", timeout=18)
+    # 1) tenta via ADB (se tiver device conectado)
+    out = ""
+    if adb.ensure():
+        out = adb.shell("pm list packages -3", timeout=18)
+
+    # 2) fallback: Termux local (sem ADB)
+    if not out:
+        out = _local_shell("pm list packages -3")
+
     pkgs: List[str] = []
+    patterns = re.compile(r"(roblox|rblx|blox|rbx)", re.IGNORECASE)
+
     for line in out.splitlines():
         line = line.strip()
         if not line.startswith("package:"):
             continue
         pkg = line.replace("package:", "").strip()
-        if "roblox" in pkg.lower():
+        if patterns.search(pkg):
             pkgs.append(pkg)
+
     return sorted(set(pkgs))
 
 def setup_wizard(cfg: dict, adb: ADB) -> dict:
