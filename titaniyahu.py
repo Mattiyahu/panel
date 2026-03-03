@@ -7,7 +7,7 @@ Principais mudanças:
 - NÃO usa mais "adb shell sh -c ..." para monkey/am start (isso engole args em alguns devices)
 - Usa "adb shell <cmd> <arg1> <arg2> ..." (lista de args) = confiável
 """
-
+from urllib.parse import urlparse, parse_qs
 from __future__ import annotations
 
 import argparse
@@ -285,7 +285,53 @@ class ADB:
             time.sleep(0.2)
         return self.is_connected()
 
+def to_roblox_deeplink(link: str) -> str:
+    """
+    Converte links Roblox para roblox:// deeplink.
+    Suporta:
+      - roblox://... (já é)
+      - https://www.roblox.com/share?code=...&type=Server  -> roblox://navigation/share_links?code=...&type=Server
+      - https://www.roblox.com/games/start?placeId=...&gameInstanceId=... -> roblox://experiences/start?placeId=...&gameInstanceId=...
+      - https://www.roblox.com/games/<placeId>/... -> roblox://experiences/start?placeId=<placeId>
+    """
+    link = (link or "").strip()
+    if not link:
+        return ""
 
+    if link.lower().startswith("roblox://"):
+        return link
+
+    u = urlparse(link)
+    host = (u.netloc or "").lower()
+    path = u.path or ""
+    q = parse_qs(u.query or "")
+
+    # 1) Share link (Private Server)
+    # https://www.roblox.com/share?code=XXXX&type=Server  -> roblox://navigation/share_links?code=XXXX&type=Server
+    if "roblox.com" in host and path.rstrip("/") == "/share":
+        code = (q.get("code", [""])[0] or "").strip()
+        typ = (q.get("type", ["Server"])[0] or "Server").strip()
+        if code:
+            return f"roblox://navigation/share_links?code={code}&type={typ}"
+
+    # 2) /games/start?placeId=...&gameInstanceId=...
+    if "roblox.com" in host and path.rstrip("/") == "/games/start":
+        place_id = (q.get("placeId", [""])[0] or "").strip()
+        job = (q.get("gameInstanceId", [""])[0] or "").strip()
+        if place_id and job:
+            return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={job}"
+        if place_id:
+            return f"roblox://experiences/start?placeId={place_id}"
+
+    # 3) /games/<placeId>/...
+    m = re.search(r"/games/(\d+)", path)
+    if "roblox.com" in host and m:
+        place_id = m.group(1)
+        # (para VIP antigo com privateServerLinkCode, o deeplink moderno recomendado é share?code=...)
+        return f"roblox://experiences/start?placeId={place_id}"
+
+    # Se não reconheceu, retorna vazio (pra NÃO cair pro navegador)
+    return ""
 # =========================
 # 📦 Detect packages (ADB or Termux)
 # =========================
@@ -510,22 +556,36 @@ class TitaniyahuMonitor:
         ok = (rc == 0) and ("error" not in txt.lower())
         return ok, txt
 
-    def apply_link(self, package: str, link: str) -> Tuple[bool, str]:
-        # ✅ args list (link é um argumento só, não quebra)
-        rc1, out1, err1 = self.adb.shell_list(
-            ["am", "start", "-a", "android.intent.action.VIEW", "-c", "android.intent.category.BROWSABLE", "-d", link],
-            timeout=18
+    def apply_link(self, package: str, raw_link: str) -> Tuple[bool, str]:
+    deeplink = to_roblox_deeplink(raw_link)
+
+    if not deeplink:
+        return False, (
+            "Não consegui converter esse link para deeplink roblox://.\n"
+            "Para PRIVATE SERVER use o link novo:\n"
+            "  https://www.roblox.com/share?code=XXXX&type=Server\n"
+            "ou direto:\n"
+            "  roblox://navigation/share_links?code=XXXX&type=Server"
         )
-        rc2, out2, err2 = self.adb.shell_list(
-            ["am", "start", "-a", "android.intent.action.VIEW", "-c", "android.intent.category.BROWSABLE", "-d", link, "-p", package],
-            timeout=18
-        )
-        txt = (
-            "[VIEW sem -p]\n" + ((out1 + "\n" + err1).strip() or "(vazio)") +
-            "\n\n[VIEW com -p]\n" + ((out2 + "\n" + err2).strip() or "(vazio)")
-        )
-        ok = (rc1 == 0) or (rc2 == 0)
-        return ok, txt
+
+    # Tenta com -p primeiro, e se não resolver tenta sem -p
+    attempts = [
+        ["am", "start", "-a", "android.intent.action.VIEW", "-d", deeplink, "-p", package],
+        ["am", "start", "-a", "android.intent.action.VIEW", "-d", deeplink],
+    ]
+
+    debug_lines = [f"DEEPLINK: {deeplink}"]
+    ok_any = False
+
+    for argv in attempts:
+        rc, out, err = self.adb.shell_list(argv, timeout=18)
+        txt = (out + "\n" + err).strip()
+        debug_lines.append(f"\nCMD: {' '.join(argv)}\nRC: {rc}\n{txt or '(vazio)'}")
+
+        if rc == 0 and ("error" not in txt.lower()):
+            ok_any = True
+
+    return ok_any, "\n".join(debug_lines)
 
     def open_vip(self, package: str) -> bool:
         link = self.choose_vip_link()
