@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 🖥️ TITANIYAHU - Roblox AutoRejoin (Termux/ADB) 🖥️
-v5.3.1 - FIX: Deeplink para Servidor VIP (privateServerLinkCode)
+v5.3.2 - FIX: SyntaxError (future imports) + Deeplink VIP
 """
 from urllib.parse import urlparse, parse_qs
-from __future__ import annotations
 
 import argparse
 import json
@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 APP_NAME = "TITANIYAHU"
-VERSION = "5.3.1"
+VERSION = "5.3.2"
 CONFIG_FILE = "titaniyahu_config.json"
 
 DEFAULT_CONFIG = {
@@ -697,6 +697,7 @@ def main():
     parser = argparse.ArgumentParser(description=f"{APP_NAME} v{VERSION}")
     parser.add_argument("--pkg", action="append", help="Pacote(s) para monitorar")
     parser.add_argument("--vip", action="append", help="Link(s) VIP")
+    parser.add_argument("--auto", action="store_true", help="Modo automático")
     args = parser.parse_args()
 
     cfg = load_config()
