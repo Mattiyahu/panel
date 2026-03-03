@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
 🖥️ TITANIYAHU - Roblox AutoRejoin (Termux/ADB) 🖥️
-v5.3 - FIX definitivo: monkey args + am start args (Roblox não abrindo)
-
-Principais mudanças:
-- NÃO usa mais "adb shell sh -c ..." para monkey/am start (isso engole args em alguns devices)
-- Usa "adb shell <cmd> <arg1> <arg2> ..." (lista de args) = confiável
+v5.3.1 - FIX: Deeplink para Servidor VIP (privateServerLinkCode)
 """
 from urllib.parse import urlparse, parse_qs
 from __future__ import annotations
@@ -23,7 +19,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 APP_NAME = "TITANIYAHU"
-VERSION = "5.3"
+VERSION = "5.3.1"
 CONFIG_FILE = "titaniyahu_config.json"
 
 DEFAULT_CONFIG = {
@@ -292,6 +288,7 @@ def to_roblox_deeplink(link: str) -> str:
       - roblox://... (já é)
       - https://www.roblox.com/share?code=...&type=Server  -> roblox://navigation/share_links?code=...&type=Server
       - https://www.roblox.com/games/start?placeId=...&gameInstanceId=... -> roblox://experiences/start?placeId=...&gameInstanceId=...
+      - https://www.roblox.com/games/<placeId>/...?privateServerLinkCode=<linkCode> -> roblox://experiences/start?placeId=<placeId>&linkCode=<linkCode>
       - https://www.roblox.com/games/<placeId>/... -> roblox://experiences/start?placeId=<placeId>
     """
     link = (link or "").strip()
@@ -327,11 +324,15 @@ def to_roblox_deeplink(link: str) -> str:
     m = re.search(r"/games/(\d+)", path)
     if "roblox.com" in host and m:
         place_id = m.group(1)
-        # (para VIP antigo com privateServerLinkCode, o deeplink moderno recomendado é share?code=...)
+        # VIP antigo com privateServerLinkCode
+        link_code = (q.get("privateServerLinkCode", [""])[0] or "").strip()
+        if link_code:
+            return f"roblox://experiences/start?placeId={place_id}&linkCode={link_code}"
         return f"roblox://experiences/start?placeId={place_id}"
 
     # Se não reconheceu, retorna vazio (pra NÃO cair pro navegador)
     return ""
+
 # =========================
 # 📦 Detect packages (ADB or Termux)
 # =========================
@@ -557,296 +558,170 @@ class TitaniyahuMonitor:
         return ok, txt
 
     def apply_link(self, package: str, raw_link: str) -> Tuple[bool, str]:
-    deeplink = to_roblox_deeplink(raw_link)
+        deeplink = to_roblox_deeplink(raw_link)
 
-    if not deeplink:
-        return False, (
-            "Não consegui converter esse link para deeplink roblox://.\n"
-            "Para PRIVATE SERVER use o link novo:\n"
-            "  https://www.roblox.com/share?code=XXXX&type=Server\n"
-            "ou direto:\n"
-            "  roblox://navigation/share_links?code=XXXX&type=Server"
-        )
-
-    # Tenta com -p primeiro, e se não resolver tenta sem -p
-    attempts = [
-        ["am", "start", "-a", "android.intent.action.VIEW", "-d", deeplink, "-p", package],
-        ["am", "start", "-a", "android.intent.action.VIEW", "-d", deeplink],
-    ]
-
-    debug_lines = [f"DEEPLINK: {deeplink}"]
-    ok_any = False
-
-    for argv in attempts:
-        rc, out, err = self.adb.shell_list(argv, timeout=18)
-        txt = (out + "\n" + err).strip()
-        debug_lines.append(f"\nCMD: {' '.join(argv)}\nRC: {rc}\n{txt or '(vazio)'}")
-
-        if rc == 0 and ("error" not in txt.lower()):
-            ok_any = True
-
-    return ok_any, "\n".join(debug_lines)
-
-    def open_vip(self, package: str) -> bool:
-        link = self.choose_vip_link()
-
-        if not self.adb.ensure():
-            # LITE local
-            rc, out, err = local_shell(
-                f"am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d '{link}' -p {package}",
-                timeout=14
+        if not deeplink:
+            return False, (
+                "Não consegui converter esse link para deeplink roblox://.\n"
+                "Para PRIVATE SERVER use o link novo:\n"
+                "  https://www.roblox.com/share?code=XXXX&type=Server\n"
+                "ou direto:\n"
+                "  roblox://navigation/share_links?code=XXXX&type=Server"
             )
-            return rc == 0 and ("error" not in (out + err).lower())
 
-        # FULL: abrir app primeiro (monkey ou launcher)
-        if self.cfg.get("monkey_first", True):
-            ok, txt = self.open_app_monkey(package)
-            if not ok:
-                UI.log(package, "monkey falhou — vou tentar launcher", "WARN")
-                UI.box("MONKEY DEBUG", txt or "(vazio)")
-                ok2, txt2 = self.open_app_launcher(package)
-                if not ok2:
-                    UI.log(package, "launcher também falhou", "ERROR")
-                    UI.box("LAUNCHER DEBUG", txt2 or "(vazio)")
-                else:
-                    UI.log(package, "App aberto (launcher)", "SUCCESS")
-            else:
-                UI.log(package, "App aberto (monkey)", "SUCCESS")
-        else:
-            ok2, txt2 = self.open_app_launcher(package)
-            if not ok2:
-                UI.log(package, "launcher falhou", "ERROR")
-                UI.box("LAUNCHER DEBUG", txt2 or "(vazio)")
-            else:
-                UI.log(package, "App aberto (launcher)", "SUCCESS")
+        # Tenta com -p primeiro, e se não resolver tenta sem -p
+        attempts = [
+            ["am", "start", "-a", "android.intent.action.VIEW", "-d", deeplink, "-p", package],
+            ["am", "start", "-a", "android.intent.action.VIEW", "-d", deeplink],
+        ]
 
-        # espera PID
-        pid = self.wait_pid(package, int(self.cfg.get("launch_wait_sec", 14)))
-        if pid:
-            UI.log(package, f"PID detectado: {pid}", "INFO")
-        else:
-            UI.log(package, "Sem PID após abrir app (mesmo assim vou aplicar link).", "WARN")
+        debug_lines = [f"DEEPLINK: {deeplink}"]
+        ok_any = False
 
-        # aplica link
-        ok_link, debug_txt = self.apply_link(package, link)
-        if not ok_link:
-            UI.log(package, "Aplicação do link falhou (debug abaixo)", "ERROR")
-            UI.box("AM START DEBUG", debug_txt)
+        for argv in attempts:
+            rc, out, err = self.adb.shell_list(argv, timeout=18)
+            txt = (out + "\n" + err).strip()
+            debug_lines.append(f"CMD: {' '.join(argv)} -> RC={rc}")
+            if rc == 0 and "error" not in txt.lower():
+                ok_any = True
+                break
+        
+        return ok_any, "\n".join(debug_lines)
 
-        time.sleep(int(self.cfg.get("link_apply_wait_sec", 6)))
-        pid2 = self.wait_pid(package, int(self.cfg.get("launch_wait_sec", 14)))
-        return pid2 is not None
-
-    def force_stop(self, package: str) -> bool:
-        if not self.adb.ensure():
-            return False
-        self.adb.shell_list(["am", "force-stop", package], timeout=12)
-        time.sleep(0.3)
-        return True
-
-    def soft_restart(self, package: str, reason: str = "") -> bool:
-        now = time.time()
-        sample = self.samples.setdefault(package, ProcSample())
-        if now < sample.cooldown_until:
-            UI.log(package, f"Cooldown ativo ({int(sample.cooldown_until-now)}s)", "WARN")
-            return False
-
-        if self.adb.ensure():
-            UI.log(package, f"Reiniciando FULL • motivo: {reason or 'n/a'}", "WARN")
-            self.force_stop(package)
-            time.sleep(1.0)
-            ok = self.open_vip(package)
-        else:
-            UI.log(package, f"Reiniciando LITE (sem force-stop) • motivo: {reason or 'n/a'}", "WARN")
-            ok = self.open_vip(package)
-
-        sample.cooldown_until = time.time() + int(self.cfg.get("cooldown_time", 12))
-        sample.last_launch_ts = time.time()
-        sample.lowcpu_seconds = 0
-        sample.lowrss_seconds = 0
-        sample.last_proc_jiffies = 0
-        sample.last_total_jiffies = 0
-        sample.last_seen_pid = ""
-
-        if ok:
-            UI.log(package, "Rejoin OK", "SUCCESS")
-            send_webhook(self.cfg.get("webhook_url", ""), f"✅ {package} rejoin OK • motivo: {reason}")
-        else:
-            UI.log(package, "Rejoin falhou (sem PID)", "ERROR")
-            send_webhook(self.cfg.get("webhook_url", ""), f"❌ {package} rejoin falhou • motivo: {reason}")
-        return ok
-
-    # ---------- RULES ----------
-    def should_ignore_rules(self, package: str) -> bool:
-        warm = int(self.cfg.get("warmup_time", 20))
-        sample = self.samples.setdefault(package, ProcSample())
-        return sample.last_launch_ts > 0 and (time.time() - sample.last_launch_ts) < warm
-
-    def tick_package_full(self, package: str, interval: int,
-                          inet: Optional[bool], avail_mem_mb: Optional[int]) -> None:
-        sample = self.samples.setdefault(package, ProcSample())
-        pid = self.get_pid(package)
-
-        if not pid:
-            sample.lowcpu_seconds = 0
-            sample.lowrss_seconds = 0
-            UI.log(package, "PROCESSO OFFLINE (FULL)", "ERROR")
-            self.soft_restart(package, "processo offline")
-            return
-
-        cpu = self.cpu_percent(package, pid)
-        rss = self.rss_mb(pid)
-
-        if self.should_ignore_rules(package):
-            UI.log(package, f"WARMUP • CPU {cpu:.1f}% • RSS {rss:.0f}MB", "INFO")
-            return
-
-        low_cpu = cpu <= float(self.cfg.get("low_cpu_threshold", 8.0))
-        low_rss = rss <= float(self.cfg.get("min_rss_mb", 60))
-
-        sample.lowcpu_seconds = sample.lowcpu_seconds + interval if low_cpu else 0
-        sample.lowrss_seconds = sample.lowrss_seconds + interval if low_rss else 0
-
-        if sample.lowcpu_seconds >= int(self.cfg.get("max_lowcpu_time", 30)):
-            self.soft_restart(package, f"CPU baixa {sample.lowcpu_seconds}s ({cpu:.1f}%)")
-            return
-
-        if sample.lowrss_seconds >= int(self.cfg.get("max_lowrss_time", 30)):
-            self.soft_restart(package, f"RSS baixo {sample.lowrss_seconds}s ({rss:.0f}MB)")
-            return
-
-        if inet is False and self.internet_fail_seconds >= int(self.cfg.get("internet_fail_time", 25)):
-            self.soft_restart(package, "internet sem ping")
-            return
-
-        if avail_mem_mb is not None and avail_mem_mb <= int(self.cfg.get("device_low_mem_mb", 350)) \
-           and self.low_mem_seconds >= int(self.cfg.get("device_low_mem_time", 30)):
-            self.soft_restart(package, f"memória baixa do device ({avail_mem_mb}MB livre)")
-            return
-
-        cpu_color = Theme.GREEN_NEON if cpu > 20 else (Theme.CYAN if cpu > 8 else Theme.YELLOW)
-        rss_color = Theme.CYAN if rss >= float(self.cfg.get("min_rss_mb", 60)) else Theme.YELLOW
-        UI.log(package, f"OK • CPU {cpu_color}{cpu:.1f}%{Theme.RESET}{Theme.GREEN_LIGHT} • RSS {rss_color}{rss:.0f}MB{Theme.RESET}", "SUCCESS")
-
-    def monitor_loop(self) -> None:
+    def run_monitor(self):
         UI.banner()
-        pkgs = self.cfg.get("packages") or []
-        interval = int(self.cfg.get("check_interval", 10))
-        if not pkgs:
-            UI.log("SYSTEM", "Nenhum pacote configurado. Use --detect.", "ERROR")
+        if not self.adb.ensure():
+            UI.log("ADB", "Nenhum dispositivo conectado via ADB!", "ERROR")
             return
 
-        UI.box("CONFIG", "\n".join([
-            f"Intervalo: {interval}s | Cooldown: {self.cfg.get('cooldown_time')}s | Warmup: {self.cfg.get('warmup_time')}s",
-            f"monkey_first: {self.cfg.get('monkey_first', True)} | launch_wait: {self.cfg.get('launch_wait_sec')}s | link_wait: {self.cfg.get('link_apply_wait_sec')}s",
-            f"Ping: {'ON' if self.cfg.get('ping_enabled', True) else 'OFF'} | host: {self.cfg.get('ping_host')}",
-            f"ADB auto_connect: {self.cfg.get('adb', {}).get('auto_connect', True)} | connect_target: {self.cfg.get('adb', {}).get('connect_target') or '(vazio)'}",
-            f"Pacotes: {len(pkgs)}",
-        ]))
+        pkgs = self.cfg.get("packages") or []
+        if not pkgs:
+            UI.log("CONFIG", "Nenhum pacote Roblox configurado!", "ERROR")
+            return
 
-        UI.spinner("Inicializando (rejoin) pacotes...", 1.0)
-        for p in pkgs:
-            self.soft_restart(p, "startup")
-            time.sleep(0.6)
+        UI.log("SYSTEM", f"Monitorando: {', '.join(pkgs)}", "SUCCESS")
+        UI.log("SYSTEM", f"Intervalo: {self.cfg.get('check_interval')}s", "INFO")
 
-        cycle = 0
         while self.running:
-            cycle += 1
-            adb_ok = self.adb.ensure()
-            mode = "FULL" if adb_ok else "LITE"
-
-            print(f"\n{Theme.GREEN_DARK}{'─'*64}{Theme.RESET}")
-            print(f"{Theme.CYAN}{Theme.SYMBOLS['radar']} CICLO {cycle:04d} • {datetime.now().strftime('%H:%M:%S')} • MODE={mode}{Theme.RESET}")
-            print(f"{Theme.GREEN_DARK}{'─'*64}{Theme.RESET}\n")
-
-            total_mb, avail_mb = self.device_mem()
-            inet = self.internet_ok()
-
-            if inet is None:
-                UI.log("NET", "Ping indisponível/disabled • ignorando regra de internet", "WARN")
-                self.internet_fail_seconds = 0
-            elif inet is False:
-                self.internet_fail_seconds += interval
-                UI.log("NET", f"Sem ping ({self.internet_fail_seconds}s)", "WARN")
+            # 1) Internet check
+            net = self.internet_ok()
+            if net is False:
+                self.internet_fail_seconds += self.cfg.get("check_interval", 10)
+                UI.log("NET", f"Sem internet ({self.internet_fail_seconds}s)", "WARN")
             else:
-                if self.internet_fail_seconds >= interval:
-                    UI.log("NET", "Ping OK (internet voltou)", "SUCCESS")
+                if self.internet_fail_seconds > 0:
+                    UI.log("NET", "Internet voltou!", "SUCCESS")
                 self.internet_fail_seconds = 0
 
-            if avail_mb is not None and avail_mb <= int(self.cfg.get("device_low_mem_mb", 350)):
-                self.low_mem_seconds += interval
-                UI.log("MEM", f"Memória baixa: {avail_mb}MB livres ({self.low_mem_seconds}s)", "WARN")
+            # 2) Mem check
+            total_m, avail_m = self.device_mem()
+            if avail_m is not None and avail_m < self.cfg.get("device_low_mem_mb", 350):
+                self.low_mem_seconds += self.cfg.get("check_interval", 10)
+                UI.log("MEM", f"Memória baixa: {avail_m}MB ({self.low_mem_seconds}s)", "WARN")
             else:
                 self.low_mem_seconds = 0
-                if avail_mb is not None and total_mb is not None:
-                    UI.log("MEM", f"Memória OK: {avail_mb}MB livres de {total_mb}MB", "INFO")
 
-            if not adb_ok:
-                UI.log("ADB", "OFFLINE • tentando reconectar automaticamente...", "WARN")
-                for p in pkgs:
-                    UI.log(p, "LITE • conecte ADB para PID/CPU/RSS/force-stop", "WARN")
-            else:
-                for p in pkgs:
-                    self.tick_package_full(p, interval=interval, inet=inet, avail_mem_mb=avail_mb)
+            # 3) Loop pacotes
+            for pkg in pkgs:
+                sample = self.samples.setdefault(pkg, ProcSample())
+                now = time.time()
 
-            for s in range(interval, 0, -1):
-                warn = s <= 3
-                t = f"{Theme.BLINK}{Theme.RED}{s:02d}s{Theme.RESET}" if warn else f"{s:02d}s"
-                print(f"\r{Theme.GREEN_DARK}[{Theme.CYAN}AGUARDANDO{Theme.GREEN_DARK}] "
-                      f"{Theme.GREEN_LIGHT}próximo scan em {t}{Theme.RESET}", end="", flush=True)
-                time.sleep(1)
-            print()
+                if now < sample.cooldown_until:
+                    continue
 
+                pid = self.get_pid(pkg)
+                if not pid:
+                    UI.log(pkg, "App fechado. Reiniciando...", "WARN")
+                    self._relaunch(pkg)
+                    continue
 
-# =========================
-# CLI
-# =========================
-def parse_args():
-    p = argparse.ArgumentParser(prog="titaniyahu", add_help=True)
-    p.add_argument("--auto", action="store_true", help="Detecta pacotes e inicia monitoramento.")
-    p.add_argument("--monitor", action="store_true", help="Inicia monitoramento com pacotes do config.")
-    p.add_argument("--detect", action="store_true", help="Detecta pacotes Roblox e salva no config.")
-    return p.parse_args()
+                # Metrics
+                cpu = self.cpu_percent(pkg, pid)
+                rss = self.rss_mb(pid)
+
+                # Check CPU
+                if cpu < self.cfg.get("low_cpu_threshold", 8.0):
+                    sample.lowcpu_seconds += self.cfg.get("check_interval", 10)
+                else:
+                    sample.lowcpu_seconds = 0
+
+                # Check RSS
+                if rss < self.cfg.get("min_rss_mb", 60):
+                    sample.lowrss_seconds += self.cfg.get("check_interval", 10)
+                else:
+                    sample.lowrss_seconds = 0
+
+                UI.log(pkg, f"PID:{pid} | CPU:{cpu:.1f}% ({sample.lowcpu_seconds}s) | RSS:{rss:.1f}MB ({sample.lowrss_seconds}s)")
+
+                # Rejoin logic
+                if sample.lowcpu_seconds >= self.cfg.get("max_lowcpu_time", 30):
+                    UI.log(pkg, "CPU baixa por muito tempo. Rejoin...", "ERROR")
+                    self._relaunch(pkg)
+                elif sample.lowrss_seconds >= self.cfg.get("max_lowrss_time", 30):
+                    UI.log(pkg, "RSS baixo por muito tempo. Rejoin...", "ERROR")
+                    self._relaunch(pkg)
+
+            time.sleep(self.cfg.get("check_interval", 10))
+
+    def _relaunch(self, pkg: str):
+        sample = self.samples.setdefault(pkg, ProcSample())
+        
+        # Kill
+        self.adb.shell_list(["am", "force-stop", pkg])
+        time.sleep(1)
+
+        # Open
+        if self.cfg.get("monkey_first", True):
+            self.open_app_monkey(pkg)
+        else:
+            self.open_app_launcher(pkg)
+        
+        UI.spinner(f"Aguardando {pkg} abrir...", self.cfg.get("launch_wait_sec", 14))
+        
+        # Apply VIP
+        link = self.choose_vip_link()
+        UI.log(pkg, f"Aplicando VIP: {link}")
+        ok, debug = self.apply_link(pkg, link)
+        
+        if ok:
+            UI.log(pkg, "VIP aplicado com sucesso!", "SUCCESS")
+        else:
+            UI.log(pkg, f"Falha ao aplicar VIP:\n{debug}", "ERROR")
+
+        sample.lowcpu_seconds = 0
+        sample.lowrss_seconds = 0
+        sample.cooldown_until = time.time() + self.cfg.get("cooldown_time", 12)
 
 
 def main():
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} v{VERSION}")
+    parser.add_argument("--pkg", action="append", help="Pacote(s) para monitorar")
+    parser.add_argument("--vip", action="append", help="Link(s) VIP")
+    args = parser.parse_args()
+
     cfg = load_config()
+    if args.pkg:
+        cfg["packages"] = args.pkg
+    if args.vip:
+        cfg["vip_links"] = args.vip
+
     adb = ADB(cfg.get("adb", {}))
-    args = parse_args()
-
-    if args.detect:
-        pkgs = detect_roblox_packages(adb)
-        if pkgs:
-            cfg["packages"] = pkgs
+    
+    if not cfg.get("packages"):
+        UI.banner()
+        UI.log("INIT", "Detectando pacotes Roblox instalados...", "INFO")
+        found = detect_roblox_packages(adb)
+        if found:
+            UI.log("INIT", f"Encontrados: {found}", "SUCCESS")
+            cfg["packages"] = found
             save_config(cfg)
-            UI.banner()
-            UI.box("PACOTES", "\n".join(pkgs))
-            UI.log("SYSTEM", f"{len(pkgs)} pacotes salvos em {CONFIG_FILE}", "SUCCESS")
         else:
-            UI.log("SYSTEM", "Nenhum pacote Roblox encontrado", "ERROR")
-        return
-
-    if args.auto:
-        pkgs = detect_roblox_packages(adb)
-        if not pkgs:
-            UI.log("AUTO", "Nenhum pacote Roblox detectado", "ERROR")
+            UI.log("INIT", "Nenhum pacote Roblox encontrado automaticamente.", "WARN")
+            UI.log("INIT", "Use --pkg com.roblox.client para definir manualmente.", "INFO")
             return
-        cfg["packages"] = pkgs
-        save_config(cfg)
-        TitaniyahuMonitor(cfg, adb).monitor_loop()
-        return
 
-    if args.monitor:
-        if not cfg.get("packages"):
-            UI.log("SYSTEM", "Sem pacotes no config. Rode --detect.", "ERROR")
-            return
-        TitaniyahuMonitor(cfg, adb).monitor_loop()
-        return
-
-    # default
-    UI.banner()
-    UI.log("DICA", "Use: python titaniyahu.py --auto", "INFO")
-
+    monitor = TitaniyahuMonitor(cfg, adb)
+    monitor.run_monitor()
 
 if __name__ == "__main__":
     main()
